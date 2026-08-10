@@ -1,0 +1,384 @@
+/*
+ * Moli HTML user-agent stylesheet.
+ *
+ * Form-control rules are a semantic port of Chromium
+ * third_party/blink/renderer/core/html/resources/html.css at
+ * a03603fe9af6230a12f1b2fb2c18a7d003a0d937. The cascade shape, standard
+ * properties, system colors, light-dark() values and observable control
+ * states are retained.
+ *
+ * Blink-only values have explicit Moli owners:
+ *
+ * - 0__qem maps to CSS zero.
+ * - -webkit-small-control maps to the deterministic Linux headless control
+ *   font used by the Chromium build against which this port is tested.
+ * - -internal-align-content-block is implemented by the HTML-to-layout form
+ *   control adapter and the Taffy/Parley IFC boundary.
+ * - -internal-empty-line-height is implemented by replaced form-control
+ *   intrinsic measurement.
+ * - native widget pseudo-elements are omitted until their DOM-neutral paint
+ *   fragments exist; author-facing declarations are not approximated with
+ *   synthetic DOM.
+ *
+ * Moli has no platform AppearanceBase theme. Rules below therefore use
+ * Chromium's non-AppearanceBase branch and make native input box sizing plus
+ * textarea scrolling and resizing explicit where Blink supplies them through
+ * its widget theme.
+ */
+
+@namespace url(http://www.w3.org/1999/xhtml);
+
+html, body, address, article, aside, blockquote, center, dd, dir, div, dl, dt,
+fieldset, figcaption, figure, footer, form, header, hgroup, legend, main, nav,
+noframes, p, search, section, details, summary, optgroup,
+ul, ol, menu, h1, h2, h3, h4, h5, h6, hr, listing, plaintext, pre, xmp {
+  display: block;
+}
+
+marquee,
+input, textarea, select, button {
+  display: inline-block;
+}
+
+pre {
+  white-space: pre;
+}
+
+table {
+  display: table;
+}
+
+thead {
+  display: table-header-group;
+}
+
+tbody {
+  display: table-row-group;
+}
+
+tfoot {
+  display: table-footer-group;
+}
+
+col {
+  display: table-column;
+}
+
+colgroup {
+  display: table-column-group;
+}
+
+tr {
+  display: table-row;
+}
+
+td, th {
+  display: table-cell;
+}
+
+caption {
+  display: table-caption;
+}
+
+li,
+details > summary:first-of-type {
+  display: list-item;
+}
+
+base, basefont, datalist, head, link, meta, noembed, noframes, param, rp,
+script, style, template, title, source {
+  display: none;
+}
+
+/* Form controls. */
+
+button {
+  appearance: auto;
+}
+
+input, textarea, select, button {
+  margin: 0;
+  font: 13.3333px Arial, sans-serif;
+  text-rendering: auto;
+  color: FieldText;
+  letter-spacing: normal;
+  word-spacing: normal;
+  line-height: normal;
+  text-transform: none;
+  text-indent: 0;
+  text-shadow: none;
+  display: inline-block;
+  text-align: start;
+}
+
+textarea {
+  appearance: auto;
+  border: 1px solid light-dark(#767676, #858585);
+  column-count: initial !important;
+  resize: both;
+  cursor: text;
+  padding: 2px;
+  white-space: pre-wrap;
+  overflow: auto;
+  overflow-wrap: break-word;
+  background-color: Field;
+  font-family: monospace;
+}
+
+input {
+  appearance: auto;
+  box-sizing: border-box;
+  cursor: text;
+  padding: 1px 0;
+  border: 2px inset light-dark(#767676, #858585);
+  background-color: Field;
+}
+
+input,
+input[type="email" i],
+input[type="number" i],
+input[type="password" i],
+input[type="search" i],
+input[type="tel" i],
+input[type="text" i],
+input[type="url" i] {
+  padding-block: 1px;
+  padding-inline: 2px;
+}
+
+input[type="search" i] {
+  appearance: auto;
+  box-sizing: border-box;
+}
+
+input[type="tel" i] {
+  direction: ltr;
+}
+
+input[type="hidden" i],
+input[type="image" i],
+input[type="file" i] {
+  appearance: none;
+  padding: initial;
+  background-color: initial;
+  border: initial;
+  cursor: default;
+}
+
+input[type="hidden" i] {
+  display: none !important;
+}
+
+input[type="file" i] {
+  color: inherit;
+  text-align: start !important;
+  text-overflow: ellipsis !important;
+  white-space: pre;
+}
+
+input[type="image" i] {
+  cursor: pointer;
+}
+
+input[type="radio" i],
+input[type="checkbox" i] {
+  appearance: auto;
+  box-sizing: border-box;
+  padding: initial;
+  background-color: initial;
+  border: initial;
+  cursor: default;
+}
+
+input[type="checkbox" i] {
+  margin: 3px 3px 3px 4px;
+}
+
+input[type="radio" i] {
+  margin: 3px 3px 0 5px;
+}
+
+input[type="color" i] {
+  appearance: auto;
+  inline-size: 50px;
+  block-size: 27px;
+  border: 1px solid ButtonBorder;
+  padding: 1px 2px;
+  cursor: default;
+  box-sizing: border-box;
+  background-color: ButtonFace;
+  color: ButtonText;
+}
+
+input[type="button" i],
+input[type="submit" i],
+input[type="reset" i] {
+  appearance: auto;
+  user-select: none;
+  white-space: pre;
+}
+
+input[type="button" i],
+input[type="submit" i],
+input[type="reset" i],
+button {
+  text-align: center;
+  cursor: default;
+  padding-block: 1px;
+  padding-inline: 6px;
+  border: 2px outset ButtonBorder;
+  box-sizing: border-box;
+  background-color: ButtonFace;
+  color: ButtonText;
+}
+
+input[type="checkbox" i]:disabled,
+input[type="file" i]:disabled,
+input[type="hidden" i]:disabled,
+input[type="image" i]:disabled,
+input[type="radio" i]:disabled,
+input[type="range" i]:disabled {
+  background-color: initial;
+}
+
+input[type="range" i] {
+  appearance: auto;
+  padding: initial;
+  border: initial;
+  margin: 2px;
+  cursor: default;
+  color: light-dark(#101010, #ffffff);
+}
+
+input[type="range" i]:disabled {
+  color: #c5c5c5;
+}
+
+input[type="button" i]:disabled,
+input[type="submit" i]:disabled,
+input[type="reset" i]:disabled,
+input[type="color" i]:disabled,
+button:disabled {
+  background-color: light-dark(rgba(239, 239, 239, 0.3), rgba(19, 1, 1, 0.3));
+  border-color: light-dark(rgba(118, 118, 118, 0.3), rgba(195, 195, 195, 0.3));
+  color: light-dark(rgba(16, 16, 16, 0.3), rgba(255, 255, 255, 0.3));
+}
+
+input[type="button" i]:active,
+input[type="submit" i]:active,
+input[type="reset" i]:active,
+button:active {
+  border-style: inset;
+}
+
+input[type="button" i]:active:disabled,
+input[type="submit" i]:active:disabled,
+input[type="reset" i]:active:disabled,
+button:active:disabled {
+  border-style: outset;
+}
+
+input:disabled,
+textarea:disabled {
+  cursor: default;
+  background-color: light-dark(rgba(239, 239, 239, 0.3), rgba(59, 59, 59, 0.3));
+  border-color: rgba(118, 118, 118, 0.3);
+  color: light-dark(#545454, #aaaaaa);
+}
+
+input:not([type="image" i], [type="range" i], [type="checkbox" i], [type="radio" i]) {
+  overflow: clip !important;
+  overflow-clip-margin: 0 !important;
+}
+
+select {
+  appearance: auto;
+  box-sizing: border-box;
+  align-items: center;
+  white-space: pre;
+  color: FieldText;
+  background-color: Field;
+  border: 1px solid light-dark(#767676, #858585);
+  cursor: default;
+  border-radius: 0;
+}
+
+select:disabled {
+  opacity: 0.7;
+  border-color: rgba(118, 118, 118, 0.3);
+  color: light-dark(GrayText, #aaaaaa);
+}
+
+optgroup {
+  font-weight: bolder;
+  display: block;
+}
+
+option {
+  font-weight: normal;
+  display: block;
+  padding-inline: 2px;
+  padding-block-start: 0;
+  padding-block-end: 1px;
+  white-space: nowrap;
+  min-block-size: 1.2em;
+}
+
+optgroup:disabled,
+option:disabled,
+select[disabled] > option {
+  color: light-dark(GrayText, #aaaaaa);
+}
+
+output {
+  display: inline;
+}
+
+meter {
+  appearance: auto;
+  block-size: 1em;
+  box-sizing: border-box;
+  display: inline-block;
+  inline-size: 5em;
+  vertical-align: -0.2em;
+}
+
+progress {
+  appearance: auto;
+  block-size: 1em;
+  box-sizing: border-box;
+  display: inline-block;
+  inline-size: 10em;
+  vertical-align: -0.2em;
+}
+
+/* Remaining construction and basic inline decoration defaults. */
+
+audio:not([controls]) {
+  display: none !important;
+}
+
+picture,
+slot {
+  display: contents;
+}
+
+dialog:not([open]) {
+  display: none;
+}
+
+dialog[open] {
+  display: block;
+}
+
+u, ins {
+  text-decoration: underline;
+}
+
+s, strike, del {
+  text-decoration: line-through;
+}
+
+body {
+  margin: 8px;
+}

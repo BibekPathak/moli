@@ -1,0 +1,183 @@
+use moli_core::{RendererOutputItem, RendererOutputPublication, RendererOutputTransportMessage};
+use serde_json::json;
+use std::collections::VecDeque;
+
+use super::super::publication_route::RendererPublicationOwner;
+use super::super::publication_route::RendererPublicationRoute;
+use super::super::runtime_command_barrier::RuntimeCommandOutputBarriers;
+use super::prepared_outputs::PreparedProtocolOutputs;
+use crate::conn::{BackgroundProtocolEvent, CdpConnection, CommandDispatchContext};
+
+/// Ingests one renderer transport message against only the exact Runtime
+/// command identity carried by its records.
+///
+/// Matching routes use the full arbitrary-Runtime capability ceiling, then
+/// split the concrete batch at the barrier. Nonmatching routes keep their
+/// source-specific ceiling. This avoids the old global mode where one pending
+/// command narrowed output for unrelated sessions.
+pub(crate) async fn ingest_renderer_output_transport_async(
+    conn: &mut CdpConnection,
+    publication: RendererOutputTransportMessage,
+    barriers: &mut RuntimeCommandOutputBarriers,
+    command_context: &mut CommandDispatchContext,
+) -> Vec<BackgroundProtocolEvent> {
+    match publication {
+        RendererOutputTransportMessage::StreamControl(control) => {
+            conn.apply_renderer_output_stream_control(control);
+        }
+        RendererOutputTransportMessage::PageReservationReleased {
+            owner_local_host_id,
+            page_id,
+        } => {
+            conn.release_renderer_page_output_owner_reservation(owner_local_host_id, page_id);
+        }
+        RendererOutputTransportMessage::CursorLeaseDeclared { cursor, lease_id } => {
+            conn.declare_renderer_output_cursor_lease(cursor, lease_id);
+        }
+        RendererOutputTransportMessage::CursorLeaseReleased { stream, lease_id } => {
+            conn.release_renderer_output_cursor_lease(stream, lease_id);
+        }
+        RendererOutputTransportMessage::Publication(output) => {
+            let ready = match conn.admit_renderer_output_publication(output) {
+                super::RendererOutputIngressAdmission::Ready(ready) => ready,
+                super::RendererOutputIngressAdmission::Buffered
+                | super::RendererOutputIngressAdmission::Stale => {
+                    return command_context.take_protocol_events();
+                }
+            };
+            let mut ready = VecDeque::from(ready);
+            while let Some(output) = ready.pop_front() {
+                let (output, owner) = output.into_parts();
+                let cursor = output.cursor();
+                ingest_renderer_output_publication(conn, output, owner, barriers, command_context)
+                    .await;
+                match conn.complete_renderer_output_projection(cursor) {
+                    super::RendererOutputIngressAdmission::Ready(next) => ready.extend(next),
+                    super::RendererOutputIngressAdmission::Buffered => {}
+                    super::RendererOutputIngressAdmission::Stale => {
+                        unreachable!("a completed projection cannot become stale")
+                    }
+                }
+            }
+        }
+    }
+    command_context.take_protocol_events()
+}
+
+async fn ingest_renderer_output_publication(
+    conn: &mut CdpConnection,
+    publication: RendererOutputPublication,
+    owner: RendererPublicationOwner,
+    barriers: &mut RuntimeCommandOutputBarriers,
+    command_context: &mut CommandDispatchContext,
+) {
+    let cursor = publication.cursor();
+    let stream = publication.cursor().stream();
+    let route = owner.resolve(conn);
+    if conn.scheduler_activity_trace_enabled() {
+        conn.record_scheduler_activity_trace(json!({
+            "kind": "concrete_renderer_output_ingress",
+            "streamEpoch": stream.epoch().get(),
+            "streamSequence": publication.cursor().sequence(),
+            "recordCount": publication.records().len(),
+            "routeCurrent": route.is_some(),
+        }));
+    }
+    let Some(route) = route else {
+        // The stream was bound to exactly one owner when it opened. If that
+        // owner has since retired, the cursor is still admitted so response
+        // fences cannot hang, but its historical records must not be projected
+        // into a replacement target or browser context.
+        return;
+    };
+    let records = publication.into_records();
+    match route {
+        RendererPublicationRoute::AttachedSession { session_id } => {
+            project_renderer_output_records_for_route(
+                conn,
+                Some(&session_id),
+                records,
+                cursor,
+                barriers,
+                command_context,
+            )
+            .await;
+        }
+        RendererPublicationRoute::UnattachedOwner { owner_route } => {
+            let mut route_scope = conn.scoped_none_session_owner_route_override(owner_route);
+            project_renderer_output_records_for_route(
+                route_scope.conn_mut(),
+                None,
+                records,
+                cursor,
+                barriers,
+                command_context,
+            )
+            .await;
+        }
+    }
+}
+
+async fn project_renderer_output_records_for_route(
+    conn: &mut CdpConnection,
+    session_id: Option<&str>,
+    records: Vec<moli_core::RendererOutputRecord>,
+    cursor: moli_core::RendererOutputCursor,
+    barriers: &mut RuntimeCommandOutputBarriers,
+    command_context: &mut CommandDispatchContext,
+) {
+    for record in records {
+        let (renderer_cause, item) = record.into_parts();
+        match item {
+            RendererOutputItem::OwnerAction(action) => {
+                let outputs =
+                    PreparedProtocolOutputs::from_renderer_owner_action(conn, session_id, action)
+                        .await;
+                barriers
+                    .route_publication_outputs(
+                        conn,
+                        session_id,
+                        renderer_cause.as_ref(),
+                        Some(cursor),
+                        outputs,
+                        command_context,
+                    )
+                    .await;
+            }
+            RendererOutputItem::Observation(observation) => {
+                let outputs = if let moli_core::RendererProtocolObservation::Network {
+                    source_document,
+                    item,
+                } = &observation
+                {
+                    let Some(outputs) = PreparedProtocolOutputs::from_renderer_network_observation(
+                        conn,
+                        session_id,
+                        *source_document,
+                        item,
+                    ) else {
+                        continue;
+                    };
+                    outputs
+                } else {
+                    PreparedProtocolOutputs::from_renderer_observation(
+                        conn,
+                        session_id,
+                        cursor.stream().renderer_agent(),
+                        &observation,
+                    )
+                };
+                barriers
+                    .route_publication_outputs(
+                        conn,
+                        session_id,
+                        renderer_cause.as_ref(),
+                        Some(cursor),
+                        outputs,
+                        command_context,
+                    )
+                    .await;
+            }
+        }
+    }
+}

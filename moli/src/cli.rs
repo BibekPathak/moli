@@ -1,0 +1,538 @@
+use std::{ffi::OsString, num::NonZeroU32};
+
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+const FETCH_INFER_FLAGS: &[&str] = &[
+    "--dump",
+    "--header",
+    "-H",
+    "--trace-network",
+    "--trace-matched-response-body",
+    "--noscript",
+    "--strip-mode",
+    "--with-base",
+    "--with-frames",
+    "--wait-until",
+    "--wait-selector",
+    "--wait-script",
+    "--wait-script-file",
+    "--delay-ms",
+    "--wait-response-url",
+    "--wait-response-body",
+    "--wait-response-json",
+    "--document-start-script",
+    "--document-start-script-file",
+    "--image",
+    "--font",
+    "--audio",
+    "--video",
+    "--media",
+    "--text-track",
+    "--resource",
+    "--disable-subframes",
+    "--wait-ms",
+    "--profile-dir",
+];
+const SERVE_INFER_FLAGS: &[&str] = &["--host", "--port", "--timeout", "--layout"];
+const EXPLICIT_COMMANDS: &[&str] = &["fetch", "serve", "mcp", "help", "version"];
+const DUMP_MODES: &[&str] = &[
+    "json",
+    "html",
+    "markdown",
+    "wpt",
+    "semantic_tree",
+    "semantic_tree_text",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Parser)]
+#[command(
+    name = "moli",
+    version,
+    about = "A Rust headless browser runtime scaffold",
+    subcommand_required = true,
+    disable_help_subcommand = true
+)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum Commands {
+    Fetch(Box<FetchArgs>),
+    Serve(ServeArgs),
+    Mcp(McpArgs),
+    Help,
+    Version,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct FetchArgs {
+    #[arg(long, value_enum)]
+    pub dump: Option<DumpFormat>,
+
+    #[arg(short = 'H', long = "header", value_name = "HEADER", value_parser = parse_request_header_arg)]
+    pub headers: Vec<RequestHeaderArg>,
+
+    #[arg(long)]
+    pub noscript: bool,
+
+    #[arg(long)]
+    pub with_base: bool,
+
+    #[arg(long)]
+    pub with_frames: bool,
+
+    #[arg(long)]
+    pub trace_network: bool,
+
+    #[arg(long, requires = "trace_network")]
+    pub trace_matched_response_body: bool,
+
+    #[arg(long, value_enum, value_delimiter = ',')]
+    pub strip_mode: Vec<StripModeChoice>,
+
+    #[arg(long, value_enum, default_value = "done")]
+    pub wait_until: FetchWaitUntil,
+
+    #[arg(long)]
+    pub wait_selector: Option<String>,
+
+    #[arg(long)]
+    pub wait_script: Option<String>,
+
+    #[arg(long)]
+    pub wait_script_file: Option<String>,
+
+    #[arg(long, default_value_t = 0)]
+    pub delay_ms: u64,
+
+    #[arg(long)]
+    pub wait_response_url: Option<String>,
+
+    #[arg(long)]
+    pub wait_response_body: Option<String>,
+
+    #[arg(long, value_parser = parse_response_json_path_arg)]
+    pub wait_response_json: Option<ResponseJsonPathArg>,
+
+    #[arg(long, alias = "wait-ms", default_value_t = 30_000)]
+    pub timeout: u64,
+
+    #[command(flatten)]
+    pub common: CommonArgs,
+
+    #[arg(value_name = "URL")]
+    pub url: String,
+}
+
+impl FetchArgs {
+    pub fn strip_options(&self) -> StripOptions {
+        let mut strip = StripOptions::default();
+
+        if self.noscript {
+            strip.js = true;
+        }
+
+        for mode in &self.strip_mode {
+            match mode {
+                StripModeChoice::Js => strip.js = true,
+                StripModeChoice::Ui => strip.ui = true,
+                StripModeChoice::Css => strip.css = true,
+                StripModeChoice::Full => {
+                    strip.js = true;
+                    strip.ui = true;
+                    strip.css = true;
+                }
+            }
+        }
+
+        strip
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResponseJsonPathArg {
+    pub path: Vec<String>,
+    pub expected: String,
+}
+
+fn parse_response_json_path_arg(raw: &str) -> Result<ResponseJsonPathArg, String> {
+    let Some(separator) = raw.find('=') else {
+        return Err("response JSON wait must be in 'path=value' form".to_owned());
+    };
+    let path = raw[..separator].trim();
+    if path.is_empty() {
+        return Err("response JSON wait path must not be empty".to_owned());
+    }
+    let segments = path
+        .split('.')
+        .map(str::trim)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if segments.iter().any(String::is_empty) {
+        return Err("response JSON wait path must not contain empty segments".to_owned());
+    }
+    Ok(ResponseJsonPathArg {
+        path: segments,
+        expected: raw[separator + 1..].to_owned(),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestHeaderArg {
+    pub name: String,
+    pub value: String,
+}
+
+fn parse_request_header_arg(raw: &str) -> Result<RequestHeaderArg, String> {
+    let Some(separator) = raw.find(':') else {
+        return Err("header must be in 'Name: Value' form".to_owned());
+    };
+
+    let name = raw[..separator].trim();
+    if name.is_empty() {
+        return Err("header name must not be empty".to_owned());
+    }
+
+    let value = raw[separator + 1..].trim_start_matches([' ', '\t']);
+    Ok(RequestHeaderArg {
+        name: name.to_owned(),
+        value: value.to_owned(),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct ServeArgs {
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
+    #[arg(long, default_value_t = 9222)]
+    pub port: u16,
+
+    #[arg(long, default_value_t = 10)]
+    pub timeout: u32,
+
+    #[arg(long, default_value_t = 16)]
+    pub cdp_max_connections: u16,
+
+    #[arg(long, default_value_t = 128)]
+    pub cdp_max_pending_connections: u16,
+
+    #[command(flatten)]
+    pub common: CommonArgs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct McpArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Args)]
+pub struct CommonArgs {
+    #[arg(long)]
+    pub insecure_disable_tls_host_verification: bool,
+
+    #[arg(long)]
+    pub obey_robots: bool,
+
+    #[arg(long)]
+    pub http_proxy: Option<String>,
+
+    #[arg(long)]
+    pub http_no_proxy: Option<String>,
+
+    #[arg(long = "http-host-resolve", value_name = "HOST:PORT:ADDR")]
+    pub http_host_resolve: Vec<String>,
+
+    #[arg(long)]
+    pub proxy_bearer_token: Option<String>,
+
+    #[arg(long)]
+    pub http_max_concurrent: Option<NonZeroU32>,
+
+    /// Limit active fetch-runtime transfers per origin.
+    ///
+    /// This is a scheduler limit, not libcurl's per-host connection-pool cap.
+    /// Use `--http-max-host-connections` to change the HTTP/1-style transport
+    /// connection cap.
+    #[arg(long)]
+    pub http_max_host_open: Option<NonZeroU32>,
+
+    /// Limit transport connections per host/group.
+    ///
+    /// Defaults to 6 to match Chromium's normal HTTP/1 socket-pool shape. This
+    /// does not limit HTTP/2 streams; use `--http2-max-concurrent-streams` for
+    /// that.
+    #[arg(long)]
+    pub http_max_host_connections: Option<u8>,
+
+    /// Limit total transport connections across all hosts.
+    #[arg(long)]
+    pub http_max_total_connections: Option<u16>,
+
+    /// Limit concurrent HTTP/2 streams.
+    #[arg(long)]
+    pub http2_max_concurrent_streams: Option<u16>,
+
+    /// Override the HTTP connect timeout in milliseconds for every request.
+    ///
+    /// Without an override, top-level navigations retain the transport default
+    /// and browser subresources use a 10-second connect timeout.
+    #[arg(long)]
+    pub http_connect_timeout: Option<u32>,
+
+    #[arg(long)]
+    pub http_timeout: Option<u32>,
+
+    #[arg(long)]
+    pub http_max_response_size: Option<usize>,
+
+    #[arg(long)]
+    pub http_cache_dir: Option<String>,
+
+    #[arg(long)]
+    pub profile_dir: Option<String>,
+
+    #[arg(long)]
+    pub image: bool,
+
+    #[arg(long)]
+    pub font: bool,
+
+    #[arg(long)]
+    pub audio: bool,
+
+    #[arg(long)]
+    pub video: bool,
+
+    #[arg(long)]
+    pub media: bool,
+
+    #[arg(long)]
+    pub text_track: bool,
+
+    /// Fetch every optional image, font, audio, video, media, and text-track
+    /// resource family.
+    #[arg(long)]
+    pub resource: bool,
+
+    #[arg(long)]
+    pub disable_subframes: bool,
+
+    /// Enable the real on-demand layout renderer and screenshot surfaces.
+    ///
+    /// Without this flag Moli keeps deterministic compatibility
+    /// geometry and does not construct layout or paint output.
+    #[arg(long)]
+    pub layout: bool,
+
+    #[arg(long = "cookie-file")]
+    pub cookie_file: Vec<String>,
+
+    #[arg(long)]
+    pub document_start_script: Vec<String>,
+
+    #[arg(long)]
+    pub document_start_script_file: Vec<String>,
+
+    #[arg(long)]
+    pub block_private_networks: bool,
+
+    #[arg(long)]
+    pub block_cidrs: Option<String>,
+
+    #[arg(long, value_enum)]
+    pub log_level: Option<LogLevel>,
+
+    #[arg(long, value_enum)]
+    pub log_format: Option<LogFormat>,
+
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    pub log_filter_scopes: Option<String>,
+
+    #[arg(long)]
+    pub user_agent: Option<String>,
+
+    #[arg(long)]
+    pub user_agent_suffix: Option<String>,
+
+    #[arg(long)]
+    pub web_bot_auth_key_file: Option<String>,
+
+    #[arg(long)]
+    pub web_bot_auth_keyid: Option<String>,
+
+    #[arg(long)]
+    pub web_bot_auth_domain: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StripOptions {
+    pub js: bool,
+    pub ui: bool,
+    pub css: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum LogLevel {
+    Debug,
+    Info,
+    Warn,
+    Error,
+    Fatal,
+}
+
+impl LogLevel {
+    pub fn as_tracing_filter(self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Info => "info",
+            Self::Warn => "warn",
+            Self::Error | Self::Fatal => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum LogFormat {
+    Pretty,
+    Logfmt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum DumpFormat {
+    // Stable machine-readable output for scrapling-style integrations.
+    Json,
+    Html,
+    Markdown,
+    Wpt,
+    SemanticTree,
+    SemanticTreeText,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum StripModeChoice {
+    Js,
+    Ui,
+    Css,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum FetchWaitUntil {
+    DomContentLoaded,
+    Load,
+    NetworkIdle,
+    DomStable,
+    Done,
+}
+
+pub fn normalize_args_for_compat<I, T>(itr: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let mut args: Vec<OsString> = itr.into_iter().map(Into::into).collect();
+
+    if args.is_empty() {
+        args.push(OsString::from("moli"));
+    }
+
+    if let Some(inferred_command) = infer_command(args.get(1)) {
+        args.insert(1, OsString::from(inferred_command));
+    }
+
+    normalize_dump_flag(&mut args);
+    args
+}
+
+fn infer_command(next: Option<&OsString>) -> Option<&'static str> {
+    let Some(next) = next else {
+        return Some("serve");
+    };
+    let next = next.to_string_lossy();
+
+    if EXPLICIT_COMMANDS.contains(&next.as_ref()) {
+        return None;
+    }
+
+    if next.starts_with("http://") || next.starts_with("https://") {
+        return Some("fetch");
+    }
+
+    if FETCH_INFER_FLAGS.contains(&next.as_ref()) {
+        return Some("fetch");
+    }
+
+    if SERVE_INFER_FLAGS
+        .iter()
+        .any(|flag| next == *flag || next.starts_with(&format!("{flag}=")))
+    {
+        return Some("serve");
+    }
+
+    None
+}
+
+fn normalize_dump_flag(args: &mut Vec<OsString>) {
+    let Some(index) = args.iter().position(|arg| arg == "--dump") else {
+        return;
+    };
+
+    let next = args
+        .get(index + 1)
+        .map(|arg| arg.to_string_lossy().into_owned());
+    let next_is_valid_dump_mode = next
+        .as_deref()
+        .is_some_and(|candidate| DUMP_MODES.contains(&candidate));
+
+    if !next_is_valid_dump_mode {
+        args.insert(index + 1, OsString::from("html"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delay_ms_infers_fetch_command() {
+        let args =
+            normalize_args_for_compat(["moli", "--delay-ms", "250", "https://example.test/"]);
+        let cli = Cli::parse_from(args);
+
+        match cli.command {
+            Commands::Fetch(args) => assert_eq!(args.delay_ms, 250),
+            other => panic!("expected fetch command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn port_equals_infers_serve_command() {
+        let args = normalize_args_for_compat(["moli", "--port=0"]);
+        let cli = Cli::parse_from(args);
+
+        match cli.command {
+            Commands::Serve(args) => assert_eq!(args.port, 0),
+            other => panic!("expected serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn layout_infers_serve_command() {
+        let args = normalize_args_for_compat(["moli", "--layout"]);
+        let cli = Cli::parse_from(args);
+
+        match cli.command {
+            Commands::Serve(args) => assert!(args.common.layout),
+            other => panic!("expected serve command, got {other:?}"),
+        }
+    }
+}

@@ -1,0 +1,1386 @@
+use std::{
+    borrow::Cow,
+    cell::{Cell, RefCell},
+    collections::VecDeque,
+    ops::{Deref, DerefMut},
+    rc::Rc,
+};
+
+use url::Url;
+use xml5ever::{
+    Attribute as XmlAttribute, ExpandedName as XmlExpandedName, QualName as XmlQualName,
+    driver::{XmlParseOpts, parse_document as parse_xml_document},
+    interface::{ElementFlags as XmlElementFlags, QuirksMode as XmlQuirksMode},
+    tendril::{StrTendril as XmlStrTendril, TendrilSink as XmlTendrilSink},
+    tree_builder::{NodeOrText as XmlNodeOrText, TreeSink as XmlTreeSink},
+};
+use xmlparser::{
+    ElementEnd as XmlElementEnd, Token as XmlTokenizerToken, Tokenizer as XmlTokenizer,
+};
+
+use moli_dom::native::{Attribute as NativeAttribute, DomHost, NativeDom, NativeNodeId, Node};
+use moli_stylesheet_blocking::{
+    DocumentOwnedBlockingStylesheetDiscoveryInput, collect_document_owned_blocking_stylesheets,
+    link_rel_includes_token,
+};
+
+use super::{
+    ParserDocumentHandoff, ParserDocumentHandoffs, html_chunks,
+    stream::prepare_parser_script_handoff_for_static_document,
+    xml_tree_viewer::transform_document_to_xml_tree_view,
+};
+
+const CDATA_MARKER_PI_TARGET: &str = "moli-cdata";
+const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
+
+#[derive(Debug, Clone, Default)]
+pub struct XmlParser;
+
+#[derive(Debug, Clone)]
+pub(super) struct XmlParseHandle {
+    pub(super) node_id: NativeNodeId,
+    pub(super) element_name: Option<Rc<XmlQualName>>,
+}
+
+struct XmlDocumentSink<'a> {
+    target: RefCell<XmlLiveTreeSinkTarget<'a>>,
+    quirks_mode: Cell<XmlQuirksMode>,
+}
+
+enum XmlDomHost<'a> {
+    Owned(Box<DomHost>),
+    Borrowed(&'a mut DomHost),
+}
+
+impl Deref for XmlDomHost<'_> {
+    type Target = DomHost;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Owned(dom_host) => dom_host.as_ref(),
+            Self::Borrowed(dom_host) => dom_host,
+        }
+    }
+}
+
+impl DerefMut for XmlDomHost<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Owned(dom_host) => dom_host.as_mut(),
+            Self::Borrowed(dom_host) => dom_host,
+        }
+    }
+}
+
+struct XmlLiveTreeSinkTarget<'a> {
+    dom_host: XmlDomHost<'a>,
+    document_handle: NativeNodeId,
+    cdata_sections: Vec<String>,
+    namespace_declarations: VecDeque<Vec<XmlNamespaceDeclaration>>,
+    ordered_runtime_handoffs: Vec<XmlParserRuntimeHandoff>,
+    source_has_unclosed_element_at_eof: bool,
+}
+
+struct XmlNamespaceDeclaration {
+    ordinary_attributes_before: usize,
+    attribute: NativeAttribute,
+}
+
+#[derive(Clone, Copy)]
+enum XmlParserRuntimeHandoff {
+    Script(NativeNodeId),
+    ModulepreloadLink(NativeNodeId),
+}
+
+impl XmlParser {
+    pub fn parse(&self, final_url: Url, xml: String) -> NativeDom {
+        self.parse_with_script_handoffs(final_url, xml).0
+    }
+
+    pub fn parse_with_script_handoffs(
+        &self,
+        final_url: Url,
+        xml: String,
+    ) -> (NativeDom, Vec<super::ParserScriptHandoff>) {
+        let (document, handoffs) = self.parse_with_document_handoffs(final_url, xml);
+        let (ordered_handoffs, _) = handoffs.into_parts();
+        let script_handoffs = ordered_handoffs
+            .into_iter()
+            .filter_map(|handoff| match handoff {
+                ParserDocumentHandoff::Script(script) => Some(*script),
+                ParserDocumentHandoff::ModulepreloadLink(_) => None,
+            })
+            .collect();
+        (document, script_handoffs)
+    }
+
+    pub fn parse_with_document_handoffs(
+        &self,
+        final_url: Url,
+        xml: String,
+    ) -> (NativeDom, ParserDocumentHandoffs) {
+        self.parse_with_document_handoffs_and_presentation(final_url, xml, false)
+    }
+
+    /// Parses a top-level XML navigation and applies Chromium's source-tree
+    /// presentation when the document has no associated style information.
+    /// DOMParser and child-document callers must use the raw parser entry point.
+    pub fn parse_top_level_document_with_handoffs(
+        &self,
+        final_url: Url,
+        xml: String,
+    ) -> (NativeDom, ParserDocumentHandoffs) {
+        self.parse_with_document_handoffs_and_presentation(final_url, xml, true)
+    }
+
+    fn parse_with_document_handoffs_and_presentation(
+        &self,
+        final_url: Url,
+        xml: String,
+        present_unstyled_xml: bool,
+    ) -> (NativeDom, ParserDocumentHandoffs) {
+        let source_has_unclosed_element_at_eof = xml_source_has_unclosed_element_at_eof(&xml);
+        let namespace_declarations = xml_namespace_declarations(&xml);
+        let (xml, cdata_sections) = xml_with_cdata_markers(&xml);
+        let sink = XmlDocumentSink::new(XmlLiveTreeSinkTarget::new_owned(
+            final_url,
+            cdata_sections,
+            namespace_declarations,
+            source_has_unclosed_element_at_eof,
+        ));
+        let mut parser = parse_xml_document(sink, XmlParseOpts::default());
+        for chunk in html_chunks(&xml) {
+            parser.process(XmlStrTendril::from(chunk));
+        }
+        let (mut document, ordered_runtime_handoffs) = parser.finish().finish_document();
+        if present_unstyled_xml {
+            document = transform_document_to_xml_tree_view(document);
+        }
+        let ordered_handoffs = ordered_runtime_handoffs
+            .into_iter()
+            .map(|handoff| match handoff {
+                XmlParserRuntimeHandoff::Script(node_id) => {
+                    ParserDocumentHandoff::Script(Box::new(
+                        prepare_parser_script_handoff_for_static_document(&document, node_id, 1, 0),
+                    ))
+                }
+                XmlParserRuntimeHandoff::ModulepreloadLink(node_id) => {
+                    ParserDocumentHandoff::ModulepreloadLink(node_id)
+                }
+            })
+            .collect();
+        let blocking_stylesheet_inputs = collect_document_owned_blocking_stylesheets(&document)
+            .iter()
+            .map(DocumentOwnedBlockingStylesheetDiscoveryInput::from)
+            .collect();
+        (
+            document,
+            ParserDocumentHandoffs::new(ordered_handoffs, blocking_stylesheet_inputs),
+        )
+    }
+
+    /// Parses an XML tree directly into an empty XML Document that already
+    /// belongs to `dom_host`.
+    ///
+    /// The mutable borrow is retained by the tree sink for exactly this
+    /// synchronous parser call. Returned script handles are discovery facts;
+    /// the caller remains responsible for parser-script ordering and execution.
+    pub fn parse_tree_into_document(
+        &self,
+        dom_host: &mut DomHost,
+        document_handle: NativeNodeId,
+        xml: &str,
+    ) -> Option<Vec<NativeNodeId>> {
+        let source_has_unclosed_element_at_eof = xml_source_has_unclosed_element_at_eof(xml);
+        let namespace_declarations = xml_namespace_declarations(xml);
+        let target = XmlLiveTreeSinkTarget::new_borrowed(dom_host, document_handle)?
+            .with_namespace_declarations(namespace_declarations)
+            .with_source_has_unclosed_element_at_eof(source_has_unclosed_element_at_eof);
+        let (xml, cdata_sections) = xml_with_cdata_markers(xml);
+        let sink = XmlDocumentSink::new(target.with_cdata_sections(cdata_sections));
+        let mut parser = parse_xml_document(sink, XmlParseOpts::default());
+        for chunk in html_chunks(&xml) {
+            parser.process(XmlStrTendril::from(chunk));
+        }
+        Some(parser.finish().finish_live_tree())
+    }
+}
+
+// xml5ever 0.39 transitions from its Main tree-building phase directly to End
+// on EOF and therefore does not report a still-open element. Keep this check
+// deliberately narrower than a second well-formedness parser: tokenizer errors
+// and mismatched tags defer to xml5ever's own parse-error reporting.
+fn xml_source_has_unclosed_element_at_eof(source: &str) -> bool {
+    let mut open_elements = Vec::<(String, String)>::new();
+    let mut pending_element = None::<(String, String)>;
+
+    for token in XmlTokenizer::from(source) {
+        let Ok(token) = token else {
+            return false;
+        };
+        match token {
+            XmlTokenizerToken::ElementStart { prefix, local, .. } => {
+                if pending_element.is_some() {
+                    return false;
+                }
+                pending_element = Some((prefix.as_str().to_owned(), local.as_str().to_owned()));
+            }
+            XmlTokenizerToken::ElementEnd {
+                end: XmlElementEnd::Open,
+                ..
+            } => {
+                let Some(element) = pending_element.take() else {
+                    return false;
+                };
+                open_elements.push(element);
+            }
+            XmlTokenizerToken::ElementEnd {
+                end: XmlElementEnd::Empty,
+                ..
+            } => {
+                if pending_element.take().is_none() {
+                    return false;
+                }
+            }
+            XmlTokenizerToken::ElementEnd {
+                end: XmlElementEnd::Close(prefix, local),
+                ..
+            } => {
+                let closes_current =
+                    open_elements
+                        .pop()
+                        .is_some_and(|(open_prefix, open_local)| {
+                            open_prefix == prefix.as_str() && open_local == local.as_str()
+                        });
+                if pending_element.is_some() || !closes_current {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pending_element.is_some() || !open_elements.is_empty()
+}
+
+fn xml_with_cdata_markers(xml: &str) -> (String, Vec<String>) {
+    let mut output = String::with_capacity(xml.len());
+    let mut cdata_sections = Vec::new();
+    let mut copied_until = 0;
+
+    for token in XmlTokenizer::from(xml) {
+        let Ok(XmlTokenizerToken::Cdata { text, span }) = token else {
+            continue;
+        };
+        let range = span.range();
+        if range.start < copied_until {
+            continue;
+        }
+        output.push_str(&xml[copied_until..range.start]);
+        let index = cdata_sections.len();
+        cdata_sections.push(text.as_str().to_owned());
+        output.push_str("<?");
+        output.push_str(CDATA_MARKER_PI_TARGET);
+        output.push(' ');
+        output.push_str(&index.to_string());
+        output.push_str("?>");
+        copied_until = range.end;
+    }
+
+    if cdata_sections.is_empty() {
+        return (xml.to_owned(), cdata_sections);
+    }
+
+    output.push_str(&xml[copied_until..]);
+    (output, cdata_sections)
+}
+
+/// xml5ever consumes namespace declarations while resolving qualified names,
+/// so its tree sink never receives the declarations as attributes. The DOM,
+/// however, exposes `xmlns` declarations as Attr nodes in the XMLNS namespace.
+/// Capture them in element-creation order and merge them at the tree-sink
+/// boundary.
+fn xml_namespace_declarations(xml: &str) -> VecDeque<Vec<XmlNamespaceDeclaration>> {
+    let mut declarations = VecDeque::new();
+    let mut current = None::<(usize, Vec<XmlNamespaceDeclaration>)>;
+
+    for token in XmlTokenizer::from(xml) {
+        let Ok(token) = token else {
+            break;
+        };
+        match token {
+            XmlTokenizerToken::ElementStart { .. } => current = Some((0, Vec::new())),
+            XmlTokenizerToken::Attribute {
+                prefix,
+                local,
+                value,
+                ..
+            } => {
+                let is_default_declaration =
+                    prefix.as_str().is_empty() && local.as_str() == "xmlns";
+                let is_prefixed_declaration = prefix.as_str() == "xmlns";
+                if !is_default_declaration && !is_prefixed_declaration {
+                    if let Some((ordinary_attributes, _)) = current.as_mut() {
+                        *ordinary_attributes += 1;
+                    }
+                    continue;
+                }
+                let Some((ordinary_attributes_before, declarations)) = current.as_mut() else {
+                    continue;
+                };
+                declarations.push(XmlNamespaceDeclaration {
+                    ordinary_attributes_before: *ordinary_attributes_before,
+                    attribute: NativeAttribute::new(
+                        local.as_str().to_owned(),
+                        XMLNS_NAMESPACE.to_owned(),
+                        is_prefixed_declaration.then(|| "xmlns".to_owned()),
+                        decode_xml_attribute_value(value.as_str()),
+                    ),
+                });
+            }
+            XmlTokenizerToken::ElementEnd {
+                end: XmlElementEnd::Open | XmlElementEnd::Empty,
+                ..
+            } => {
+                if let Some((_, current_declarations)) = current.take() {
+                    declarations.push_back(current_declarations);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    declarations
+}
+
+fn decode_xml_attribute_value(value: &str) -> String {
+    let mut decoded = String::with_capacity(value.len());
+    let mut remaining = value;
+
+    while let Some(entity_start) = remaining.find('&') {
+        decoded.push_str(&remaining[..entity_start]);
+        let entity = &remaining[(entity_start + 1)..];
+        let Some(entity_end) = entity.find(';') else {
+            decoded.push_str(&remaining[entity_start..]);
+            return decoded;
+        };
+        let name = &entity[..entity_end];
+        let replacement = match name {
+            "amp" => Some('&'),
+            "apos" => Some('\''),
+            "gt" => Some('>'),
+            "lt" => Some('<'),
+            "quot" => Some('"'),
+            _ => name
+                .strip_prefix("#x")
+                .or_else(|| name.strip_prefix("#X"))
+                .and_then(|digits| u32::from_str_radix(digits, 16).ok())
+                .and_then(char::from_u32)
+                .or_else(|| {
+                    name.strip_prefix('#')
+                        .and_then(|digits| digits.parse::<u32>().ok())
+                        .and_then(char::from_u32)
+                }),
+        };
+        if let Some(replacement) = replacement {
+            decoded.push(replacement);
+        } else {
+            decoded.push('&');
+            decoded.push_str(name);
+            decoded.push(';');
+        }
+        remaining = &entity[(entity_end + 1)..];
+    }
+
+    decoded.push_str(remaining);
+    decoded
+}
+
+impl XmlParseHandle {
+    pub(super) fn new(node_id: NativeNodeId, element_name: Option<Rc<XmlQualName>>) -> Self {
+        Self {
+            node_id,
+            element_name,
+        }
+    }
+}
+
+impl PartialEq for XmlParseHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.node_id == other.node_id
+    }
+}
+
+impl Eq for XmlParseHandle {}
+
+impl<'a> XmlDocumentSink<'a> {
+    fn new(target: XmlLiveTreeSinkTarget<'a>) -> Self {
+        Self {
+            target: RefCell::new(target),
+            quirks_mode: Cell::new(XmlQuirksMode::NoQuirks),
+        }
+    }
+}
+
+impl XmlLiveTreeSinkTarget<'static> {
+    fn new_owned(
+        final_url: Url,
+        cdata_sections: Vec<String>,
+        namespace_declarations: VecDeque<Vec<XmlNamespaceDeclaration>>,
+        source_has_unclosed_element_at_eof: bool,
+    ) -> Self {
+        let dom_host = DomHost::from_dom(NativeDom::new_xml(final_url));
+        let document_handle = dom_host.document_handle();
+        Self {
+            dom_host: XmlDomHost::Owned(Box::new(dom_host)),
+            document_handle,
+            cdata_sections,
+            namespace_declarations,
+            ordered_runtime_handoffs: Vec::new(),
+            source_has_unclosed_element_at_eof,
+        }
+    }
+
+    fn finish_document(mut self) -> (NativeDom, Vec<XmlParserRuntimeHandoff>) {
+        self.record_unclosed_source_element_error();
+        self.restore_cdata_marker_processing_instructions();
+        let XmlDomHost::Owned(dom_host) = self.dom_host else {
+            unreachable!("owned XML parsing must finish with an owned DOM host")
+        };
+        (dom_host.snapshot_document(), self.ordered_runtime_handoffs)
+    }
+}
+
+impl<'a> XmlLiveTreeSinkTarget<'a> {
+    fn new_borrowed(dom_host: &'a mut DomHost, document_handle: NativeNodeId) -> Option<Self> {
+        let is_empty_xml_document = dom_host
+            .node(document_handle)
+            .and_then(Node::as_document)
+            .is_some_and(|document| !document.is_html_document())
+            && dom_host.child_handles(document_handle).next().is_none();
+        if !is_empty_xml_document {
+            return None;
+        }
+        Some(Self {
+            dom_host: XmlDomHost::Borrowed(dom_host),
+            document_handle,
+            cdata_sections: Vec::new(),
+            namespace_declarations: VecDeque::new(),
+            ordered_runtime_handoffs: Vec::new(),
+            source_has_unclosed_element_at_eof: false,
+        })
+    }
+
+    fn with_namespace_declarations(
+        mut self,
+        namespace_declarations: VecDeque<Vec<XmlNamespaceDeclaration>>,
+    ) -> Self {
+        self.namespace_declarations = namespace_declarations;
+        self
+    }
+
+    fn with_cdata_sections(mut self, cdata_sections: Vec<String>) -> Self {
+        self.cdata_sections = cdata_sections;
+        self
+    }
+
+    fn with_source_has_unclosed_element_at_eof(
+        mut self,
+        source_has_unclosed_element_at_eof: bool,
+    ) -> Self {
+        self.source_has_unclosed_element_at_eof = source_has_unclosed_element_at_eof;
+        self
+    }
+
+    fn finish_live_tree(mut self) -> Vec<NativeNodeId> {
+        self.record_unclosed_source_element_error();
+        self.restore_cdata_marker_processing_instructions();
+        self.ordered_runtime_handoffs
+            .into_iter()
+            .filter_map(|handoff| match handoff {
+                XmlParserRuntimeHandoff::Script(node_id) => Some(node_id),
+                XmlParserRuntimeHandoff::ModulepreloadLink(_) => None,
+            })
+            .collect()
+    }
+
+    fn record_unclosed_source_element_error(&mut self) {
+        if self.source_has_unclosed_element_at_eof && self.dom_host.dom().parse_errors().is_empty()
+        {
+            self.dom_host
+                .push_parse_error("Unexpected EOF with an unclosed XML element".to_owned());
+        }
+    }
+
+    fn document_handle(&self) -> XmlParseHandle {
+        XmlParseHandle::new(self.document_handle, None)
+    }
+
+    fn create_element(&mut self, name: XmlQualName, attrs: Vec<XmlAttribute>) -> XmlParseHandle {
+        let element_name = Rc::new(name.clone());
+        let mut attributes = attrs
+            .into_iter()
+            .map(|attribute| {
+                NativeAttribute::new(
+                    attribute.name.local.to_string(),
+                    attribute.name.ns.to_string(),
+                    attribute
+                        .name
+                        .prefix
+                        .as_ref()
+                        .map(|prefix| prefix.to_string()),
+                    attribute.value.to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (declaration_index, declaration) in self
+            .namespace_declarations
+            .pop_front()
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+        {
+            let insertion_index = declaration
+                .ordinary_attributes_before
+                .saturating_add(declaration_index)
+                .min(attributes.len());
+            attributes.insert(insertion_index, declaration.attribute);
+        }
+        let node_id = self
+            .dom_host
+            .create_parser_element_without_attributes_for_document(
+                self.document_handle,
+                name.local.to_string(),
+                name.ns.to_string(),
+                name.prefix.as_ref().map(|prefix| prefix.to_string()),
+            );
+        self.dom_host
+            .add_attrs_if_missing_for_parser(node_id, attributes);
+        if self
+            .dom_host
+            .node(node_id)
+            .is_some_and(|node| node.is_html_element_named("script"))
+        {
+            self.ordered_runtime_handoffs
+                .push(XmlParserRuntimeHandoff::Script(node_id));
+        } else if self
+            .dom_host
+            .node(node_id)
+            .and_then(Node::as_element)
+            .is_some_and(|element| {
+                element.is_html_element("link")
+                    && element
+                        .attribute("rel")
+                        .is_some_and(|rel| link_rel_includes_token(rel, "modulepreload"))
+            })
+        {
+            self.ordered_runtime_handoffs
+                .push(XmlParserRuntimeHandoff::ModulepreloadLink(node_id));
+        }
+        XmlParseHandle::new(node_id, Some(element_name))
+    }
+
+    fn create_comment(&mut self, text: String) -> XmlParseHandle {
+        XmlParseHandle::new(
+            self.dom_host
+                .create_comment_for_document(self.document_handle, &text),
+            None,
+        )
+    }
+
+    fn create_processing_instruction(&mut self, target: String, data: String) -> XmlParseHandle {
+        XmlParseHandle::new(
+            self.dom_host.create_processing_instruction_for_document(
+                self.document_handle,
+                &target,
+                &data,
+            ),
+            None,
+        )
+    }
+
+    fn append_text(&mut self, parent_id: NativeNodeId, text: String) {
+        if parent_id == self.document_handle && text.trim().is_empty() {
+            return;
+        }
+        self.insert_text_node(parent_id, None, text);
+    }
+
+    fn insert_text_node(
+        &mut self,
+        parent_id: NativeNodeId,
+        reference_child: Option<NativeNodeId>,
+        text: String,
+    ) {
+        if parent_id == self.document_handle && text.trim().is_empty() {
+            return;
+        }
+        if text.is_empty() || self.dom_host.node(parent_id).is_none() {
+            return;
+        }
+
+        if let Some(reference_child) = reference_child {
+            if self
+                .dom_host
+                .node(reference_child)
+                .and_then(Node::as_text)
+                .is_some()
+            {
+                if let Some(text_node) = self
+                    .dom_host
+                    .node_mut(reference_child)
+                    .and_then(|node| node.data_mut().as_text_mut())
+                {
+                    let mut merged = text;
+                    merged.push_str(text_node.data());
+                    text_node.set_data(merged);
+                }
+                return;
+            }
+
+            if let Some(previous) = self
+                .dom_host
+                .node(reference_child)
+                .and_then(Node::prev_sibling)
+                && self
+                    .dom_host
+                    .node(previous)
+                    .and_then(Node::as_text)
+                    .is_some()
+            {
+                if let Some(text_node) = self
+                    .dom_host
+                    .node_mut(previous)
+                    .and_then(|node| node.data_mut().as_text_mut())
+                {
+                    let mut merged = text_node.data().to_owned();
+                    merged.push_str(&text);
+                    text_node.set_data(merged);
+                }
+                return;
+            }
+        } else if let Some(last_child) = self.dom_host.node(parent_id).and_then(Node::last_child)
+            && self
+                .dom_host
+                .node(last_child)
+                .and_then(Node::as_text)
+                .is_some()
+        {
+            if let Some(text_node) = self
+                .dom_host
+                .node_mut(last_child)
+                .and_then(|node| node.data_mut().as_text_mut())
+            {
+                let mut merged = text_node.data().to_owned();
+                merged.push_str(&text);
+                text_node.set_data(merged);
+            }
+            return;
+        }
+
+        let text_node = self
+            .dom_host
+            .create_text_node_for_document(self.document_handle, &text);
+        if let Some(reference_child) = reference_child {
+            let Some(parent) = self
+                .dom_host
+                .node(reference_child)
+                .and_then(Node::parent_node)
+            else {
+                return;
+            };
+            let _ = self
+                .dom_host
+                .insert_before(parent, text_node, Some(reference_child));
+        } else {
+            let _ = self.dom_host.append_child(parent_id, text_node);
+        }
+    }
+
+    fn append(&mut self, parent_id: NativeNodeId, child: XmlNodeOrText<XmlParseHandle>) {
+        let parent_id = self.template_contents_id(parent_id).unwrap_or(parent_id);
+        match child {
+            XmlNodeOrText::AppendNode(handle) => {
+                if self.is_xml_declaration_processing_instruction(handle.node_id) {
+                    return;
+                }
+                let _ = self.dom_host.append_child(parent_id, handle.node_id);
+            }
+            XmlNodeOrText::AppendText(text) => self.append_text(parent_id, text.to_string()),
+        }
+    }
+
+    fn append_before_sibling(
+        &mut self,
+        sibling_id: NativeNodeId,
+        child: XmlNodeOrText<XmlParseHandle>,
+    ) {
+        let Some(parent_id) = self.dom_host.node(sibling_id).and_then(Node::parent_node) else {
+            return;
+        };
+        match child {
+            XmlNodeOrText::AppendNode(handle) => {
+                if self.is_xml_declaration_processing_instruction(handle.node_id) {
+                    return;
+                }
+                let _ = self
+                    .dom_host
+                    .insert_before(parent_id, handle.node_id, Some(sibling_id));
+            }
+            XmlNodeOrText::AppendText(text) => {
+                self.insert_text_node(parent_id, Some(sibling_id), text.to_string());
+            }
+        }
+    }
+
+    fn append_based_on_parent_node(
+        &mut self,
+        element_id: NativeNodeId,
+        prev_element_id: NativeNodeId,
+        child: XmlNodeOrText<XmlParseHandle>,
+    ) {
+        if self
+            .dom_host
+            .node(element_id)
+            .and_then(Node::parent_node)
+            .is_some()
+        {
+            self.append_before_sibling(element_id, child);
+        } else {
+            self.append(prev_element_id, child);
+        }
+    }
+
+    fn append_doctype(&mut self, name: String, public_id: String, system_id: String) {
+        let doctype = self.dom_host.create_document_type_for_document(
+            self.document_handle,
+            &name,
+            &public_id,
+            &system_id,
+        );
+        let _ = self.dom_host.append_child(self.document_handle, doctype);
+    }
+
+    fn is_xml_declaration_processing_instruction(&self, node_id: NativeNodeId) -> bool {
+        self.dom_host
+            .node(node_id)
+            .and_then(Node::as_processing_instruction)
+            .is_some_and(|pi| pi.target().eq_ignore_ascii_case("xml"))
+    }
+
+    fn template_contents_handle(&self, node_id: NativeNodeId) -> Option<XmlParseHandle> {
+        self.dom_host
+            .parser_template_contents_handle(node_id)
+            .map(|handle| XmlParseHandle::new(handle, None))
+    }
+
+    fn add_attrs_if_missing(&mut self, node_id: NativeNodeId, attrs: Vec<XmlAttribute>) {
+        let Some(node) = self.dom_host.node_mut(node_id) else {
+            return;
+        };
+        let Some(element) = node.data_mut().as_element_mut() else {
+            return;
+        };
+
+        for attribute in attrs {
+            let already_exists = element.attributes().iter().any(|existing| {
+                existing.namespace() == attribute.name.ns.as_ref()
+                    && existing.local_name() == attribute.name.local.as_ref()
+                    && existing.prefix()
+                        == attribute.name.prefix.as_ref().map(|prefix| prefix.as_ref())
+            });
+
+            if !already_exists {
+                element.set_attribute(
+                    attribute.name.local.to_string(),
+                    attribute.name.ns.to_string(),
+                    attribute.name.prefix.map(|prefix| prefix.to_string()),
+                    attribute.value.to_string(),
+                );
+            }
+        }
+    }
+
+    fn remove_from_parent(&mut self, node_id: NativeNodeId) {
+        let Some(parent_id) = self.dom_host.node(node_id).and_then(Node::parent_node) else {
+            return;
+        };
+        let _ = self.dom_host.remove_child(parent_id, node_id);
+    }
+
+    fn reparent_children(&mut self, node_id: NativeNodeId, new_parent_id: NativeNodeId) {
+        let child_ids = self.dom_host.child_handles(node_id).collect::<Vec<_>>();
+        for child_id in child_ids {
+            let _ = self.dom_host.append_child(new_parent_id, child_id);
+        }
+    }
+
+    fn restore_cdata_marker_processing_instructions(&mut self) {
+        self.restore_cdata_marker_processing_instructions_under(self.document_handle);
+    }
+
+    fn restore_cdata_marker_processing_instructions_under(&mut self, parent_id: NativeNodeId) {
+        let child_ids = self.dom_host.child_handles(parent_id).collect::<Vec<_>>();
+        for child_id in child_ids {
+            if let Some(data) = self.cdata_marker_data(child_id) {
+                let cdata = self
+                    .dom_host
+                    .create_cdata_section_for_document(self.document_handle, &data);
+                let _ = self
+                    .dom_host
+                    .insert_before(parent_id, cdata, Some(child_id));
+                let _ = self.dom_host.remove_child(parent_id, child_id);
+            } else {
+                self.restore_cdata_marker_processing_instructions_under(child_id);
+            }
+        }
+        if let Some(template_contents) = self.template_contents_id(parent_id) {
+            self.restore_cdata_marker_processing_instructions_under(template_contents);
+        }
+    }
+
+    fn template_contents_id(&self, node_id: NativeNodeId) -> Option<NativeNodeId> {
+        self.dom_host.parser_template_contents_handle(node_id)
+    }
+
+    fn cdata_marker_data(&self, node_id: NativeNodeId) -> Option<String> {
+        let processing_instruction = self
+            .dom_host
+            .node(node_id)?
+            .data()
+            .as_processing_instruction()?;
+        if processing_instruction.target() != CDATA_MARKER_PI_TARGET {
+            return None;
+        }
+        let index = processing_instruction.data().trim().parse::<usize>().ok()?;
+        self.cdata_sections.get(index).cloned()
+    }
+}
+
+impl<'host> XmlTreeSink for XmlDocumentSink<'host> {
+    type Handle = XmlParseHandle;
+    type Output = XmlLiveTreeSinkTarget<'host>;
+    type ElemName<'a>
+        = XmlExpandedName<'a>
+    where
+        Self: 'a;
+
+    fn finish(self) -> Self::Output {
+        self.target.into_inner()
+    }
+
+    fn parse_error(&self, err: Cow<'static, str>) {
+        self.target
+            .borrow_mut()
+            .dom_host
+            .push_parse_error(err.into_owned());
+    }
+
+    fn get_document(&self) -> Self::Handle {
+        self.target.borrow().document_handle()
+    }
+
+    fn elem_name<'a>(&'a self, target: &'a Self::Handle) -> Self::ElemName<'a> {
+        target
+            .element_name
+            .as_deref()
+            .expect("xml5ever requested the name of a non-element node")
+            .expanded()
+    }
+
+    fn create_element(
+        &self,
+        name: XmlQualName,
+        attrs: Vec<XmlAttribute>,
+        _flags: XmlElementFlags,
+    ) -> Self::Handle {
+        self.target.borrow_mut().create_element(name, attrs)
+    }
+
+    fn create_comment(&self, text: XmlStrTendril) -> Self::Handle {
+        self.target.borrow_mut().create_comment(text.to_string())
+    }
+
+    fn create_pi(&self, target: XmlStrTendril, data: XmlStrTendril) -> Self::Handle {
+        self.target
+            .borrow_mut()
+            .create_processing_instruction(target.to_string(), data.to_string())
+    }
+
+    fn append(&self, parent: &Self::Handle, child: XmlNodeOrText<Self::Handle>) {
+        self.target.borrow_mut().append(parent.node_id, child);
+    }
+
+    fn append_before_sibling(&self, sibling: &Self::Handle, child: XmlNodeOrText<Self::Handle>) {
+        self.target
+            .borrow_mut()
+            .append_before_sibling(sibling.node_id, child);
+    }
+
+    fn append_based_on_parent_node(
+        &self,
+        element: &Self::Handle,
+        prev_element: &Self::Handle,
+        child: XmlNodeOrText<Self::Handle>,
+    ) {
+        self.target.borrow_mut().append_based_on_parent_node(
+            element.node_id,
+            prev_element.node_id,
+            child,
+        );
+    }
+
+    fn append_doctype_to_document(
+        &self,
+        name: XmlStrTendril,
+        public_id: XmlStrTendril,
+        system_id: XmlStrTendril,
+    ) {
+        self.target.borrow_mut().append_doctype(
+            name.to_string(),
+            public_id.to_string(),
+            system_id.to_string(),
+        );
+    }
+
+    fn get_template_contents(&self, target: &Self::Handle) -> Self::Handle {
+        self.target
+            .borrow()
+            .template_contents_handle(target.node_id)
+            .unwrap_or_else(|| target.clone())
+    }
+
+    fn same_node(&self, left: &Self::Handle, right: &Self::Handle) -> bool {
+        left == right
+    }
+
+    fn set_quirks_mode(&self, mode: XmlQuirksMode) {
+        self.quirks_mode.set(mode);
+    }
+
+    fn add_attrs_if_missing(&self, target: &Self::Handle, attrs: Vec<XmlAttribute>) {
+        self.target
+            .borrow_mut()
+            .add_attrs_if_missing(target.node_id, attrs);
+    }
+
+    fn remove_from_parent(&self, target: &Self::Handle) {
+        self.target.borrow_mut().remove_from_parent(target.node_id);
+    }
+
+    fn reparent_children(&self, node: &Self::Handle, new_parent: &Self::Handle) {
+        self.target
+            .borrow_mut()
+            .reparent_children(node.node_id, new_parent.node_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{XmlParser, xml_source_has_unclosed_element_at_eof};
+    use crate::ParserScriptHandoff;
+    use moli_dom::native::{DomHost, NativeDom, NativeNodeId, Node, NodeType};
+    use moli_page_types::ScriptMode;
+    use url::Url;
+
+    #[test]
+    fn xml_eof_guard_only_reports_proven_unclosed_elements() {
+        assert!(xml_source_has_unclosed_element_at_eof("<root>"));
+        assert!(xml_source_has_unclosed_element_at_eof("<root><child/>"));
+        assert!(!xml_source_has_unclosed_element_at_eof("<root/>"));
+        assert!(!xml_source_has_unclosed_element_at_eof(
+            "<root></mismatched>"
+        ));
+        assert!(!xml_source_has_unclosed_element_at_eof(
+            "<root attr='unterminated></root>"
+        ));
+    }
+
+    #[test]
+    fn xml_parser_preserves_namespace_declarations_as_dom_attributes() {
+        let dom = XmlParser.parse(
+            Url::parse("https://example.test/catalog.xml").unwrap(),
+            concat!(
+                "<catalog data-before='1' xmlns='urn:catalog&amp;items' ",
+                "data-middle='2' xmlns:m='urn:meta' data-after='3'>",
+                "<m:item xmlns='urn:nested'/>",
+                "</catalog>"
+            )
+            .to_owned(),
+        );
+        let root = document_element(&dom);
+        let root_attributes = dom
+            .node(root)
+            .and_then(Node::as_element)
+            .expect("catalog element")
+            .attributes();
+
+        assert_eq!(
+            root_attributes
+                .iter()
+                .map(|attribute| attribute.name())
+                .collect::<Vec<_>>(),
+            [
+                "data-before",
+                "xmlns",
+                "data-middle",
+                "xmlns:m",
+                "data-after"
+            ]
+        );
+        assert_eq!(root_attributes[1].namespace(), super::XMLNS_NAMESPACE);
+        assert_eq!(root_attributes[1].prefix(), None);
+        assert_eq!(root_attributes[1].local_name(), "xmlns");
+        assert_eq!(root_attributes[1].value(), "urn:catalog&items");
+        assert_eq!(root_attributes[3].namespace(), super::XMLNS_NAMESPACE);
+        assert_eq!(root_attributes[3].prefix(), Some("xmlns"));
+        assert_eq!(root_attributes[3].local_name(), "m");
+        assert_eq!(root_attributes[3].value(), "urn:meta");
+
+        let child = dom
+            .child_ids(root)
+            .find(|node_id| dom.node(*node_id).is_some_and(Node::is_element))
+            .expect("nested item element");
+        let child_attributes = dom
+            .node(child)
+            .and_then(Node::as_element)
+            .expect("nested item")
+            .attributes();
+        assert_eq!(child_attributes.len(), 1);
+        assert_eq!(child_attributes[0].name(), "xmlns");
+        assert_eq!(child_attributes[0].value(), "urn:nested");
+    }
+
+    #[test]
+    fn xml_parser_populates_an_existing_xml_document_with_exact_node_owners() {
+        let parser = XmlParser;
+        let mut host = DomHost::from_dom(NativeDom::new_html(
+            Url::parse("https://parent.example.test/").unwrap(),
+        ));
+        let parent_document = host.document_handle();
+        let child_url = Url::parse("https://child.example.test/document.xml").unwrap();
+        let child_document = host.create_detached_xml_document_with_url(child_url.clone());
+
+        let script_handles = parser
+            .parse_tree_into_document(
+                &mut host,
+                child_document,
+                concat!(
+                    "<?before data?>",
+                    "<!DOCTYPE root>",
+                    "<root xmlns:h='http://www.w3.org/1999/xhtml'>",
+                    "<child attr='value'>text<![CDATA[cdata]]><!--comment--></child>",
+                    "<h:script />",
+                    "</root>"
+                ),
+            )
+            .expect("empty XML document accepts a direct parse");
+
+        assert_eq!(host.child_handles(parent_document).count(), 0);
+        assert_eq!(script_handles.len(), 1);
+        assert_eq!(
+            host.node(script_handles[0]).and_then(Node::owner_document),
+            Some(child_document)
+        );
+        assert_eq!(
+            host.node(child_document)
+                .and_then(Node::as_document)
+                .map(|document| document.url()),
+            Some(&child_url)
+        );
+
+        let mut descendants = Vec::new();
+        collect_descendants(&host, child_document, &mut descendants);
+        assert!(
+            descendants
+                .iter()
+                .all(|node_id| host.node(*node_id).and_then(Node::owner_document)
+                    == Some(child_document))
+        );
+        for expected in [
+            NodeType::ProcessingInstruction,
+            NodeType::DocumentType,
+            NodeType::Element,
+            NodeType::Text,
+            NodeType::CDataSection,
+            NodeType::Comment,
+        ] {
+            assert!(descendants.iter().any(|node_id| {
+                host.node(*node_id)
+                    .is_some_and(|node| node.node_type() == expected)
+            }));
+        }
+    }
+
+    #[test]
+    fn xml_parser_rejects_html_and_nonempty_document_targets() {
+        let parser = XmlParser;
+        let mut host = DomHost::from_dom(NativeDom::new_html(
+            Url::parse("https://example.test/").unwrap(),
+        ));
+        let html_document = host.document_handle();
+
+        assert!(
+            parser
+                .parse_tree_into_document(&mut host, html_document, "<root />")
+                .is_none()
+        );
+        assert_eq!(host.child_handles(html_document).count(), 0);
+
+        let xml_document = host.create_detached_xml_document();
+        assert!(
+            parser
+                .parse_tree_into_document(&mut host, xml_document, "<root />")
+                .is_some()
+        );
+        let children_before_retry = host.child_handles(xml_document).collect::<Vec<_>>();
+        assert!(
+            parser
+                .parse_tree_into_document(&mut host, xml_document, "<replacement />")
+                .is_none()
+        );
+        assert_eq!(
+            host.child_handles(xml_document).collect::<Vec<_>>(),
+            children_before_retry
+        );
+    }
+
+    #[test]
+    fn xml_parser_existing_document_html_template_uses_the_target_document_url() {
+        let parser = XmlParser;
+        let mut host = DomHost::from_dom(NativeDom::new_html(
+            Url::parse("https://parent.example.test/").unwrap(),
+        ));
+        let child_url = Url::parse("https://child.example.test/document.xml").unwrap();
+        let child_document = host.create_detached_xml_document_with_url(child_url.clone());
+
+        parser
+            .parse_tree_into_document(
+                &mut host,
+                child_document,
+                concat!(
+                    "<root>",
+                    "<template xmlns='http://www.w3.org/1999/xhtml'><span /></template>",
+                    "</root>"
+                ),
+            )
+            .expect("empty XML document accepts a direct parse");
+
+        let root = host
+            .child_handles(child_document)
+            .find(|node_id| host.node(*node_id).is_some_and(Node::is_element))
+            .expect("document element");
+        let template = host
+            .child_handles(root)
+            .find(|node_id| {
+                host.node(*node_id)
+                    .is_some_and(|node| node.is_html_element_named("template"))
+            })
+            .expect("HTML template element");
+        let contents = host
+            .node(template)
+            .and_then(Node::as_element)
+            .and_then(|element| element.template_contents())
+            .expect("template contents");
+        let inert_document = host
+            .node(contents)
+            .and_then(Node::owner_document)
+            .expect("template contents owner document");
+
+        assert_ne!(inert_document, host.document_handle());
+        assert_ne!(inert_document, child_document);
+        assert_eq!(
+            host.node(inert_document)
+                .and_then(Node::as_document)
+                .map(|document| document.url()),
+            Some(&child_url)
+        );
+    }
+
+    fn collect_descendants(
+        host: &DomHost,
+        parent: NativeNodeId,
+        descendants: &mut Vec<NativeNodeId>,
+    ) {
+        for child in host.child_handles(parent).collect::<Vec<_>>() {
+            descendants.push(child);
+            collect_descendants(host, child, descendants);
+        }
+    }
+
+    #[test]
+    fn xml_parser_preserves_cdata_section_nodes() {
+        let parser = XmlParser;
+        let dom = parser.parse(
+            Url::parse("https://example.test/xml").unwrap(),
+            "<foo>CDATA section: <![CDATA[ < > & ]]>.</foo>".to_owned(),
+        );
+        let document = dom.document_node_id();
+        let root = dom
+            .child_ids(document)
+            .find(|node_id| dom.node(*node_id).is_some_and(|node| node.is_element()))
+            .expect("document element");
+        let children = dom.child_ids(root).collect::<Vec<_>>();
+
+        assert_eq!(children.len(), 3);
+        assert_eq!(
+            dom.node(children[0]).map(|node| node.node_type()),
+            Some(NodeType::Text)
+        );
+        assert_eq!(
+            dom.node(children[1]).map(|node| node.node_type()),
+            Some(NodeType::CDataSection)
+        );
+        assert_eq!(
+            dom.node(children[1])
+                .and_then(|node| node.as_cdata_section())
+                .map(|cdata| cdata.data()),
+            Some(" < > & ")
+        );
+        assert_eq!(
+            dom.node(children[2]).map(|node| node.node_type()),
+            Some(NodeType::Text)
+        );
+    }
+
+    #[test]
+    fn xml_parser_puts_only_html_template_children_in_template_contents() {
+        let parser = XmlParser;
+        let html_dom = parser.parse(
+            Url::parse("https://example.test/html-template.xml").unwrap(),
+            "<template xmlns='http://www.w3.org/1999/xhtml'><test/></template>".to_owned(),
+        );
+        let html_template = document_element(&html_dom);
+        let html_contents = html_dom
+            .node(html_template)
+            .and_then(Node::as_element)
+            .and_then(|element| element.template_contents())
+            .expect("HTML template contents");
+
+        assert_eq!(html_dom.child_ids(html_template).count(), 0);
+        assert_eq!(
+            html_dom
+                .child_ids(html_contents)
+                .next()
+                .and_then(|child| html_dom.node(child))
+                .and_then(Node::as_element)
+                .map(|element| element.local_name()),
+            Some("test")
+        );
+
+        for (url, xml) in [
+            (
+                "https://example.test/no-namespace-template.xml",
+                "<template><test/></template>",
+            ),
+            (
+                "https://example.test/svg-template.xml",
+                "<template xmlns='http://www.w3.org/2000/svg'><test/></template>",
+            ),
+        ] {
+            let dom = parser.parse(Url::parse(url).unwrap(), xml.to_owned());
+            let template = document_element(&dom);
+            assert!(
+                dom.node(template)
+                    .and_then(Node::as_element)
+                    .and_then(|element| element.template_contents())
+                    .is_none()
+            );
+            assert_eq!(
+                dom.child_ids(template)
+                    .next()
+                    .and_then(|child| dom.node(child))
+                    .and_then(Node::as_element)
+                    .map(|element| element.local_name()),
+                Some("test")
+            );
+        }
+    }
+
+    #[test]
+    fn xml_parser_restores_cdata_inside_html_template_contents() {
+        let parser = XmlParser;
+        let dom = parser.parse(
+            Url::parse("https://example.test/html-template-cdata.xml").unwrap(),
+            concat!(
+                "<template xmlns='http://www.w3.org/1999/xhtml'>",
+                "<![CDATA[top-level]]>",
+                "<test><![CDATA[nested]]></test>",
+                "</template>"
+            )
+            .to_owned(),
+        );
+        let template = document_element(&dom);
+        let contents = dom
+            .node(template)
+            .and_then(Node::as_element)
+            .and_then(|element| element.template_contents())
+            .expect("HTML template contents");
+        let content_children = dom.child_ids(contents).collect::<Vec<_>>();
+
+        assert_eq!(content_children.len(), 2);
+        assert_eq!(
+            dom.node(content_children[0])
+                .and_then(Node::as_cdata_section)
+                .map(|cdata| cdata.data()),
+            Some("top-level")
+        );
+        assert_eq!(
+            dom.node(content_children[1])
+                .and_then(Node::as_element)
+                .map(|element| element.local_name()),
+            Some("test")
+        );
+        assert_eq!(
+            dom.child_ids(content_children[1])
+                .next()
+                .and_then(|child| dom.node(child))
+                .and_then(Node::as_cdata_section)
+                .map(|cdata| cdata.data()),
+            Some("nested")
+        );
+    }
+
+    fn document_element(dom: &moli_dom::native::NativeDom) -> moli_dom::native::NativeNodeId {
+        dom.child_ids(dom.document_node_id())
+            .find(|node_id| dom.node(*node_id).is_some_and(|node| node.is_element()))
+            .expect("document element")
+    }
+
+    #[test]
+    fn xml_parser_prepares_xhtml_scripts_from_recorded_tree_builder_handles() {
+        let (_, handoffs) = XmlParser.parse_with_script_handoffs(
+            Url::parse("https://example.test/page.xhtml").unwrap(),
+            concat!(
+                "<html xmlns='http://www.w3.org/1999/xhtml'><head>",
+                "<script type='importmap'>{\"imports\":{\"dep\":\"/dep.js\"}}</script>",
+                "<script defer='defer' src='data:text/javascript,globalThis.deferRan=1'></script>",
+                "<script type='module'>export const value = 1;</script>",
+                "<script async='async' src='data:text/javascript,globalThis.asyncRan=1'></script>",
+                "</head><body /></html>",
+            )
+            .to_owned(),
+        );
+
+        assert_eq!(handoffs.len(), 4);
+        assert!(matches!(
+            &handoffs[0],
+            ParserScriptHandoff::ImportMap { import_map, .. } if import_map.position == 0
+        ));
+        assert!(matches!(
+            &handoffs[1],
+            ParserScriptHandoff::NonAsyncPostParse { script, .. }
+                if script.position == 1 && script.mode == ScriptMode::Defer
+        ));
+        assert!(matches!(
+            &handoffs[2],
+            ParserScriptHandoff::NonAsyncPostParse { script, .. }
+                if script.position == 2 && script.mode == ScriptMode::ModuleDefer
+        ));
+        assert!(matches!(
+            &handoffs[3],
+            ParserScriptHandoff::AsyncPostParse { script, .. }
+                if script.position == 3 && script.mode == ScriptMode::Async
+        ));
+    }
+}
