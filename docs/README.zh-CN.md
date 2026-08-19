@@ -211,7 +211,7 @@ Moli 是一个独立的浏览器内核，而不是对 Chromium 的封装。它�
 
 ## 测试数据
 
-下面两组实测数据展示了 Moli 目前的能力区间。测试覆盖了真实网站、真实的自动化客户端、针对性的 Chromium/WPT 行为验证，以及大规模的 nextest 回归测试套件。
+下面的实测数据展示了 Moli 目前的能力区间。测试覆盖真实网站、自动化客户端、Chromium/WPT 行为验证，以及大规模的 nextest 回归测试套件。
 
 ### 公开网页混合抓取测试
 
@@ -233,7 +233,27 @@ Moli 是一个独立的浏览器内核，而不是对 Chromium 的封装。它�
 | PSS 峰值 | 102.46 MiB | 348.82 MiB |
 | 进程数 / 线程数峰值 | 1 / 24 | 11 / 123 |
 
-在目前用于验证 Moli 智能体浏览器功能范围的 WPT 测试集合中，一次完整测试运行记录了 **161.2 万项通过测试**。
+### WPT 测试
+
+在目前用于验证 Moli 智能体浏览器功能范围的 WPT 测试集合中，一次完整运行有 **161.2 万项测试通过**。
+
+### Moli 在 Lexbench-Headless-Browser 评测中的表现
+
+[Lexbench-Headless-Browser](https://github.com/lexmount/Lexbench-Headless-Browser) 的完整任务集包含 1,928 道任务，覆盖裸 CDP、Playwright、Puppeteer、Selenium 等 13 个固定版本的自动化工具及 Web 平台语义。为了加入仅提供远程端点的 Kitesurf，下图采用其中 1,308 道可比任务，所有浏览器使用相同的任务筛选规则。
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/lexbench-five-engine-caliber-b-dark.jpg">
+  <img alt="五个无头浏览器在 1,308 道可比任务上的成功率：Chrome 99.8%、Moli 81.9%、Kitesurf 62.1%、Lightpanda 53.3%、Obscura 44.9%" src="../assets/lexbench-five-engine-caliber-b-light.jpg" width="100%">
+</picture>
+
+**Moli 0.1.1 通过了 1,071 道任务，成功率为 81.88%**，高于 Kitesurf 的 62.08%、Lightpanda 的 53.29% 和 Obscura 的 44.88%；参照引擎 Chrome 为 99.85%。Kitesurf 以 k=1 运行，未覆盖任务按未通过计，远程服务的复现条件也与本地二进制不同。完整结果见 benchmark 的[五引擎报告](https://github.com/lexmount/Lexbench-Headless-Browser/blob/kitesurf-eval/docs/reports/five-engine-report-20260813.md)。
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/lexbench-efficiency-map-dark.jpg">
+  <img alt="四个本地引擎的任务成功率与单题内存峰值中位数：Chrome 99.9%、697 MiB，Moli 80.7%、92 MiB，Lightpanda 43.8%、34 MiB，Obscura 39.5%、39 MiB" src="../assets/lexbench-efficiency-map-light.jpg" width="100%">
+</picture>
+
+Kitesurf 是远程服务，无法测量 CPU、内存和进程数，因此资源对比只覆盖四个本地引擎。在另一轮 557 道任务的测试中，只统计四个引擎都完成的工作。Moli 单题 CPU 中位数为 **100.6 ms**，内存峰值中位数为 **92 MiB**；Chrome 分别为 **687 ms** 和 **697 MiB**。Moli 的 CPU 时间约为 Chrome 的 15%，内存峰值约为 13%。测试方法和完整数据见 benchmark 的[资源报告](https://github.com/lexmount/Lexbench-Headless-Browser/blob/main/docs/reports/resource-card-20260812.md)。
 
 ## 项目范围
 
