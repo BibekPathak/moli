@@ -122,3 +122,105 @@ fn consume_before_any_match_stops_without_consuming_the_separator() {
         Some("beta")
     );
 }
+
+#[test]
+fn separators_inside_a_quoted_string_do_not_split() {
+    assert_eq!(
+        split_outside_quoted_strings("text/html; boundary=\"; charset=gbk\"", ';'),
+        vec!["text/html", " boundary=\"; charset=gbk\""]
+    );
+    assert_eq!(
+        split_outside_quoted_strings("private=\"Set-Cookie, X-Auth\", max-age=60", ','),
+        vec!["private=\"Set-Cookie, X-Auth\"", " max-age=60"]
+    );
+}
+
+#[test]
+fn an_escaped_quote_does_not_close_a_quoted_string() {
+    assert_eq!(
+        split_outside_quoted_strings("attachment; name=\"a\\\"; x=1\"; y=2", ';'),
+        vec!["attachment", " name=\"a\\\"; x=1\"", " y=2"]
+    );
+}
+
+#[test]
+fn splitting_without_quotes_matches_a_plain_split() {
+    for value in [
+        "text/html; charset=utf-8",
+        "a;b;c",
+        "",
+        ";",
+        "trailing;",
+        ";leading",
+    ] {
+        assert_eq!(
+            split_outside_quoted_strings(value, ';'),
+            value.split(';').collect::<Vec<_>>(),
+            "value={value}"
+        );
+    }
+}
+
+#[test]
+fn an_unterminated_quoted_string_runs_to_the_end() {
+    assert_eq!(
+        split_outside_quoted_strings("text/html; charset=\"gbk; q=1", ';'),
+        vec!["text/html", " charset=\"gbk; q=1"]
+    );
+}
+
+#[test]
+fn quoted_values_lose_their_delimiters_and_backslashes() {
+    assert_eq!(unquote_parameter_value("\"utf-8\""), "utf-8");
+    assert_eq!(unquote_parameter_value("\"utf\\-8\""), "utf-8");
+    assert_eq!(unquote_parameter_value("\"a\\\"b\""), "a\"b");
+    // Not a quoted string, so it is returned untouched.
+    assert_eq!(unquote_parameter_value("utf-8"), "utf-8");
+    assert_eq!(unquote_parameter_value("'utf-8'"), "'utf-8'");
+    // Unterminated keeps what was read.
+    assert_eq!(unquote_parameter_value("\"gbk"), "gbk");
+}
+
+#[test]
+fn multibyte_values_keep_character_boundaries() {
+    let value = "text/plain; name=\"café; x\"; charset=utf-8";
+    assert_eq!(
+        split_outside_quoted_strings(value, ';'),
+        vec!["text/plain", " name=\"café; x\"", " charset=utf-8"]
+    );
+    assert_eq!(unquote_parameter_value("\"caf\\é\""), "café");
+}
+
+#[test]
+fn a_quote_outside_a_parameter_value_is_ordinary_data() {
+    // A `"` that does not open a parameter value must not swallow the rest of
+    // the field, or the parameters behind it become invisible.
+    assert_eq!(
+        split_outside_quoted_strings("text/html;\";charset=gbk", ';'),
+        vec!["text/html", "\"", "charset=gbk"]
+    );
+    assert_eq!(
+        split_outside_quoted_strings("a\"b;c", ';'),
+        vec!["a\"b", "c"]
+    );
+}
+
+#[test]
+fn whitespace_between_equals_and_a_quoted_value_still_opens_it() {
+    assert_eq!(
+        split_outside_quoted_strings("text/html; boundary =  \"; x\"; charset=utf-8", ';'),
+        vec!["text/html", " boundary =  \"; x\"", " charset=utf-8"]
+    );
+}
+
+#[test]
+fn a_trailing_backslash_is_kept_rather_than_dropped() {
+    // Dropping it would turn a malformed value into a well-formed one.
+    assert_eq!(unquote_parameter_value("\"31536000\\"), "31536000\\");
+    assert_eq!(unquote_parameter_value("\"a\\"), "a\\");
+}
+
+#[test]
+fn an_escaped_quote_survives_as_data() {
+    assert_eq!(unquote_parameter_value("\"utf-8\\\"\""), "utf-8\"");
+}

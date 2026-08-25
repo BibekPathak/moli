@@ -2139,6 +2139,7 @@ version = "0.1.0"
 dependencies = [
  "encoding_rs",
  "moli-charset-parser",
+ "moli-header-field",
 ]
 
 [[package]]
@@ -2209,6 +2210,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "httpdate",
+ "moli-header-field",
  "rustc-hash",
  "serde",
  "serde_json",
@@ -2385,7 +2387,6 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chromiumoxide_cdp",
- "content_disposition",
  "data-url",
  "http",
  "indexmap",
@@ -2397,6 +2398,7 @@ dependencies = [
  "moli-css-parse",
  "moli-encoding",
  "moli-fetch",
+ "moli-header-field",
  "moli-image",
  "moli-page-types",
  "moli-protocol-cdp",
