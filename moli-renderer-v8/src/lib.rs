@@ -276,6 +276,7 @@ pub use runtime::{
     RendererPageDiagnosticsSnapshot, RendererPageDumpFormat, RendererPageDumpOptions,
     RendererPageDumpStripOptions, RendererPageHandle, RendererPageReply,
     RendererPageReservationToken, RendererPageState, RendererPageTestingHandle, RendererPageView,
+    RendererPdfFont, RendererPdfGlyph, RendererPdfTextLayer, RendererPdfTextRun,
     RendererPendingDownloadActivation, RendererPendingDownloadResponse,
     RendererPendingFileChooserActivation, RendererPendingJavaScriptDialog,
     RendererPendingPopupActivation, RendererPendingSameDocumentNavigation,
