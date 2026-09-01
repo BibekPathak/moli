@@ -2388,9 +2388,10 @@ async fn navigate_session_owner_from_renderer_request_background_events_async(
     request_headers: &[(String, String)],
     browser_navigation_kind: moli_fetch::BrowserNavigationRequestKind,
 ) {
+    let owner = CommandOwnerScope::capture(conn, session_id);
     let start = navigation::start_session_owner_navigation_from_renderer(
         conn,
-        session_id,
+        &owner,
         url,
         request_method,
         request_body,
@@ -2398,7 +2399,7 @@ async fn navigate_session_owner_from_renderer_request_background_events_async(
         browser_navigation_kind,
     );
     let step =
-        navigation::finish_started_navigation_command_for_parts(conn, None, session_id, start, &[]);
+        navigation::finish_started_navigation_command_for_parts(conn, None, owner, start, &[]);
     complete_renderer_navigation_step_background_events_async(conn, out, step).await;
 }
 
@@ -6525,10 +6526,11 @@ fn try_start_page_enable_command(
                     cmd.session_id,
                 ) =>
         {
+            let owner = CommandOwnerScope::capture(conn, cmd.session_id);
             let start = match navigation::start_initial_document_navigation_for_session_owner(
                 conn,
                 cmd.id,
-                cmd.session_id,
+                &owner,
                 json!({}),
             ) {
                 Ok(start) => start,
@@ -6537,7 +6539,7 @@ fn try_start_page_enable_command(
             Some(navigation::finish_started_navigation_command_for_parts(
                 conn,
                 cmd.id,
-                cmd.session_id,
+                owner,
                 start,
                 &[],
             ))
@@ -6546,10 +6548,11 @@ fn try_start_page_enable_command(
             Some(PageCommandTaskStep::Complete(CommandOutputPlan::success()))
         }
         Ok(_) if !conn.runtime_session_owner_target_is_initial_about_blank(cmd.session_id) => {
+            let owner = CommandOwnerScope::capture(conn, cmd.session_id);
             let start = match navigation::start_initial_document_navigation_for_session_owner(
                 conn,
                 cmd.id,
-                cmd.session_id,
+                &owner,
                 json!({}),
             ) {
                 Ok(start) => start,
@@ -6558,7 +6561,7 @@ fn try_start_page_enable_command(
             Some(navigation::finish_started_navigation_command_for_parts(
                 conn,
                 cmd.id,
-                cmd.session_id,
+                owner,
                 start,
                 &[],
             ))
@@ -7484,7 +7487,9 @@ async fn complete_pending_page_command_inner(
     command_context: &mut CommandDispatchContext,
 ) -> PageCommandTaskStep {
     let command_id = completed.command_id;
+    let owner_scope = completed.owner_scope.clone();
     let session_id = completed.owner_scope.session_id().map(str::to_owned);
+    let owner_route = completed.owner_scope.session_owner_route().cloned();
     if let Some(predecessor) = completed.kind.renderer_output_predecessor() {
         command_context.set_renderer_output_predecessor(predecessor);
     }
@@ -7520,7 +7525,10 @@ async fn complete_pending_page_command_inner(
             };
             let completed_script = {
                 let Some(page) = conn
-                    .runtime_session_owner_slot_mut(session_id.as_deref())
+                    .runtime_session_owner_slot_mut_for_route(
+                        session_id.as_deref(),
+                        owner_route.as_ref(),
+                    )
                     .ok()
                     .and_then(|slot| slot.loaded_page_mut())
                 else {
@@ -7553,7 +7561,10 @@ async fn complete_pending_page_command_inner(
                 }
             };
             let Some(page) = conn
-                .runtime_session_owner_slot_mut(session_id.as_deref())
+                .runtime_session_owner_slot_mut_for_route(
+                    session_id.as_deref(),
+                    owner_route.as_ref(),
+                )
                 .ok()
                 .and_then(|slot| slot.loaded_page_mut())
             else {
@@ -7576,7 +7587,7 @@ async fn complete_pending_page_command_inner(
             return resource_search::complete_search_in_resource_command(
                 conn,
                 command_id,
-                session_id.as_deref(),
+                &owner_scope,
                 *completed,
             );
         }
@@ -7584,7 +7595,7 @@ async fn complete_pending_page_command_inner(
             return app_manifest::complete_get_app_manifest_command(
                 conn,
                 command_id,
-                session_id.as_deref(),
+                &owner_scope,
                 *completed,
                 command_context,
             );
@@ -7592,7 +7603,7 @@ async fn complete_pending_page_command_inner(
         CompletedPageCommandKind::ResetNavigationHistory { completed } => {
             return navigation::complete_reset_navigation_history_command(
                 conn,
-                session_id.as_deref(),
+                &owner_scope,
                 *completed,
             );
         }
@@ -7616,7 +7627,10 @@ async fn complete_pending_page_command_inner(
                 }
             };
             let Some(page) = conn
-                .runtime_session_owner_slot_mut(session_id.as_deref())
+                .runtime_session_owner_slot_mut_for_route(
+                    session_id.as_deref(),
+                    owner_route.as_ref(),
+                )
                 .ok()
                 .and_then(|slot| slot.loaded_page_mut())
             else {
@@ -7644,7 +7658,10 @@ async fn complete_pending_page_command_inner(
             };
             let (result, output) = {
                 let Some(page) = conn
-                    .runtime_session_owner_slot_mut(session_id.as_deref())
+                    .runtime_session_owner_slot_mut_for_route(
+                        session_id.as_deref(),
+                        owner_route.as_ref(),
+                    )
                     .ok()
                     .and_then(|slot| slot.loaded_page_mut())
                 else {
@@ -7679,7 +7696,7 @@ async fn complete_pending_page_command_inner(
         CompletedPageCommandKind::SameDocumentNavigate(completed) => {
             return navigation::complete_pending_same_document_navigate_command(
                 conn,
-                session_id.as_deref(),
+                &owner_scope,
                 *completed,
                 command_context,
             )
@@ -7697,7 +7714,7 @@ async fn complete_pending_page_command_inner(
             completed,
         } => {
             if conn
-                .ensure_document_accessible_for_session_owner(session_id.as_deref())
+                .ensure_document_accessible_for_route(session_id.as_deref(), owner_route.as_ref())
                 .is_err()
             {
                 return PageCommandTaskStep::Complete(get_frame_tree_command_output_plan(
@@ -7714,7 +7731,10 @@ async fn complete_pending_page_command_inner(
                 ));
             }
             let Some(page) = conn
-                .runtime_session_owner_slot_mut(session_id.as_deref())
+                .runtime_session_owner_slot_mut_for_route(
+                    session_id.as_deref(),
+                    owner_route.as_ref(),
+                )
                 .ok()
                 .and_then(|slot| slot.loaded_page_mut())
             else {
@@ -7772,7 +7792,10 @@ async fn complete_pending_page_command_inner(
                 }
             };
             let Some(page) = conn
-                .runtime_session_owner_slot_mut(session_id.as_deref())
+                .runtime_session_owner_slot_mut_for_route(
+                    session_id.as_deref(),
+                    owner_route.as_ref(),
+                )
                 .ok()
                 .and_then(|slot| slot.loaded_page_mut())
             else {
@@ -7803,7 +7826,10 @@ async fn complete_pending_page_command_inner(
                     ));
                 }
             };
-            let page = match conn.loaded_page_mut_for_protocol_access(session_id.as_deref()) {
+            let page = match conn.loaded_page_mut_for_protocol_access_for_route(
+                session_id.as_deref(),
+                owner_route.as_ref(),
+            ) {
                 Ok(page) => page,
                 Err(message) => {
                     return PageCommandTaskStep::Complete(CommandOutputPlan::error(
@@ -7833,7 +7859,10 @@ async fn complete_pending_page_command_inner(
                     ));
                 }
             };
-            let page = match conn.loaded_page_mut_for_protocol_access(session_id.as_deref()) {
+            let page = match conn.loaded_page_mut_for_protocol_access_for_route(
+                session_id.as_deref(),
+                owner_route.as_ref(),
+            ) {
                 Ok(page) => page,
                 Err(message) => {
                     return PageCommandTaskStep::Complete(CommandOutputPlan::error(
@@ -7878,7 +7907,10 @@ async fn complete_pending_page_command_inner(
                     ));
                 }
             };
-            let page = match conn.loaded_page_mut_for_protocol_access(session_id.as_deref()) {
+            let page = match conn.loaded_page_mut_for_protocol_access_for_route(
+                session_id.as_deref(),
+                owner_route.as_ref(),
+            ) {
                 Ok(page) => page,
                 Err(message) => {
                     return PageCommandTaskStep::Complete(CommandOutputPlan::error(
@@ -7934,8 +7966,9 @@ async fn complete_pending_page_command_inner(
                     }))
                 }
                 DevToolsPrintToPdfTransferMode::ReturnAsStream => {
-                    let stream = match conn.open_io_stream_body_source_for_session_owner(
+                    let stream = match conn.open_io_stream_body_source_for_route(
                         session_id.as_deref(),
+                        owner_route.as_ref(),
                         CapturedBody::from_bytes_spooled(pdf),
                     ) {
                         Ok(stream) => stream,
@@ -7965,7 +7998,7 @@ async fn complete_pending_page_command_inner(
         CompletedPageCommandKind::ChildFrameNavigate(completed) => {
             return navigation::complete_pending_child_frame_navigate_command(
                 conn,
-                session_id.as_deref(),
+                &owner_scope,
                 *completed,
                 command_context,
             )
@@ -7981,10 +8014,7 @@ async fn complete_pending_page_command_inner(
         }
         CompletedPageCommandKind::TraverseSameDocumentHistory(completed) => {
             return navigation::complete_pending_same_document_history_traversal_command(
-                conn,
-                command_id,
-                session_id.as_deref(),
-                *completed,
+                conn, command_id, *completed,
             );
         }
         CompletedPageCommandKind::ContinueNavigationWithoutRequestPause(completed) => {
