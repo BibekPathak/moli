@@ -777,3 +777,48 @@ async fn network_set_cookie_keeps_cookie_store_available_after_lock_holder_panic
         None,
     );
 }
+#[tokio::test(flavor = "multi_thread")]
+async fn network_get_cookies_lists_same_site_none_secure_cookie_for_loopback_http_url() {
+    // Regression: a SameSite=None; Secure cookie stored for a loopback origin
+    // was dropped from the Network.getCookies listing when queried with an
+    // http:// loopback URL, even though the cookie read path (document.cookie)
+    // treats loopback as a secure context and shows it. Chromium lists it too.
+    let mut ctx = TestContext::new();
+    ctx.conn.browser_context = Some(BrowserContext::new("BID-NONEC".into()));
+
+    ctx.process_async(json!({
+        "id": 50,
+        "method": "Network.setCookie",
+        "params": {
+            "name": "nonec",
+            "value": "1",
+            "url": "http://127.0.0.1:8765/",
+            "secure": true,
+            "sameSite": "None"
+        }
+    }))
+    .await;
+    let set = ctx.take_response_by_id(50);
+    assert_eq!(
+        set["result"]["success"],
+        json!(true),
+        "SameSite=None; Secure cookie should be accepted for a loopback origin; got {set}"
+    );
+
+    ctx.process_async(json!({
+        "id": 51,
+        "method": "Network.getCookies",
+        "params": { "urls": ["http://127.0.0.1:8765/"] }
+    }))
+    .await;
+    let listed = ctx.take_response_by_id(51);
+    let cookies = listed["result"]["cookies"]
+        .as_array()
+        .expect("getCookies cookies array");
+    assert!(
+        cookies
+            .iter()
+            .any(|cookie| cookie["name"] == json!("nonec")),
+        "SameSite=None; Secure cookie must appear for an http loopback URL; got {cookies:?}"
+    );
+}

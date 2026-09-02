@@ -39,7 +39,7 @@ pub use crate::cookie_store::{
 mod public_suffix;
 #[cfg(feature = "public_suffix")]
 pub use crate::public_suffix::CookiePublicSuffixList;
-mod utils;
+pub mod utils;
 
 #[derive(Debug)]
 pub struct IdnaErrors(idna::Errors);
