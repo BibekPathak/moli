@@ -1,5 +1,6 @@
 //! Stable cookie DTOs projected from the canonical cookie engine.
 
+use cookie_store::utils::is_secure;
 use cookie_store::{
     Cookie as StoreCookie, CookiePriority, CookieSourceScheme as CoreCookieSourceScheme, SameSite,
 };
@@ -160,12 +161,17 @@ impl StoredCookie {
     }
 
     /// Checks URL visibility with the same domain/path/secure shape as cookies.
+    ///
+    /// The secure gate uses the store's secure-context predicate (cryptographic
+    /// schemes plus loopback/localhost hosts) so that a `Secure` cookie matches
+    /// an `http://127.0.0.1`/`http://localhost` URL the same way the cookie
+    /// read path (`document.cookie`, request headers) treats it.
     pub fn matches(&self, url: &Url) -> bool {
         let Some(host) = url.host_str() else {
             return false;
         };
 
-        if self.secure && !is_secure_scheme(url) {
+        if self.secure && !is_secure(url) {
             return false;
         }
 
@@ -255,7 +261,30 @@ pub fn core_source_scheme_from_stored(
 
 #[cfg(test)]
 mod tests {
-    use super::{domain_matches, path_matches};
+    use super::{
+        StoredCookie, StoredCookieSameSite, StoredCookieSourceScheme, domain_matches, path_matches,
+    };
+    use url::Url;
+
+    fn secure_cookie(domain: &str, host_only: bool) -> StoredCookie {
+        StoredCookie {
+            name: "nonec".to_owned(),
+            value: "1".to_owned(),
+            domain: domain.to_owned(),
+            host_only,
+            path: "/".to_owned(),
+            secure: true,
+            http_only: false,
+            expires: None,
+            same_site: StoredCookieSameSite::None,
+            priority: None,
+            partition_key: None,
+            source_scheme: StoredCookieSourceScheme::Secure,
+            source_port: -1,
+            creation_index: 0,
+            last_access_index: 0,
+        }
+    }
 
     #[test]
     fn domain_matches_follow_chromium_cookie_util_cases() {
@@ -288,5 +317,36 @@ mod tests {
         assert!(path_matches("/test", "/test"));
         assert!(!path_matches("/TEST", "/test"));
         assert!(!path_matches("/test", "/TEST"));
+    }
+
+    #[test]
+    fn secure_cookie_matches_loopback_http_url_like_chromium() {
+        let cookie = secure_cookie("127.0.0.1", true);
+        let url = Url::parse("http://127.0.0.1:8765/").expect("loopback http url");
+        assert!(
+            cookie.matches(&url),
+            "a Secure cookie must be visible for an http loopback URL"
+        );
+
+        let localhost_cookie = secure_cookie("localhost", true);
+        let localhost_url = Url::parse("http://localhost/app").expect("localhost http url");
+        assert!(localhost_cookie.matches(&localhost_url));
+
+        let ipv6_url = Url::parse("http://[::1]:8765/").expect("ipv6 loopback http url");
+        let ipv6_cookie = secure_cookie(ipv6_url.host_str().expect("ipv6 loopback host"), true);
+        assert!(ipv6_cookie.matches(&ipv6_url));
+    }
+
+    #[test]
+    fn secure_cookie_still_rejects_remote_http_url() {
+        let cookie = secure_cookie("example.com", true);
+        let url = Url::parse("http://example.com/").expect("remote http url");
+        assert!(
+            !cookie.matches(&url),
+            "a Secure cookie must not be visible for a remote http URL"
+        );
+
+        let secure_url = Url::parse("https://example.com/").expect("https url");
+        assert!(cookie.matches(&secure_url));
     }
 }
