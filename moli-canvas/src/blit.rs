@@ -331,8 +331,8 @@ pub fn blit_image_data_premul(
 ) {
     if !surface_matches_len(pixels, canvas_width, canvas_height)
         || !surface_matches_len(source, source_width, source_height)
-        || dirty_width <= 0
-        || dirty_height <= 0
+        || dirty_width == 0
+        || dirty_height == 0
     {
         return;
     }
@@ -343,10 +343,7 @@ pub fn blit_image_data_premul(
         canvas_height,
         dx,
         dy,
-        dirty_x,
-        dirty_y,
-        dirty_width,
-        dirty_height,
+        ImageDataRect::new(dirty_x, dirty_y, dirty_width, dirty_height),
     ) else {
         return;
     };

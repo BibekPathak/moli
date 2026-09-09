@@ -1,5 +1,6 @@
 use super::backing_store::{
-    bump_canvas_visual_generation, canvas_like_pixels_copy, canvas_owner_from_context,
+    bump_canvas_visual_generation, canvas_like_pixels_copy, canvas_like_region_readback,
+    canvas_owner_from_context,
 };
 use super::helpers::{canonical_canvas_fill_style, canvas_unrestricted_double_arg};
 use super::recording_store::canvas_recording_state;
@@ -2017,24 +2018,43 @@ pub(crate) fn canvas_context_put_image_data_callback<'s>(
         return;
     };
 
+    if Some(bytes.len()) != byte_len(source_width, source_height) {
+        webidl::throw_index_size_error(scope);
+        return;
+    }
+
     let (dirty_x, dirty_y, dirty_width, dirty_height) =
         dirty_rect.unwrap_or((0, 0, source_width as i32, source_height as i32));
 
-    // Clip the source to the dirty rect before recording.
-    let clipped = clip_image_data_to_dirty(
-        &bytes,
-        source_width,
-        source_height,
-        dirty_x,
-        dirty_y,
-        dirty_width,
-        dirty_height,
-    );
-    let clipped_width = dirty_width.max(0) as u32;
-    let clipped_height = dirty_height.max(0) as u32;
+    // Clip the dirty rect to the source bounds before recording.
+    let left = i64::from(dirty_x) + i64::from(dirty_width.min(0));
+    let top = i64::from(dirty_y) + i64::from(dirty_height.min(0));
+    let sx = left.clamp(0, i64::from(source_width));
+    let sy = top.clamp(0, i64::from(source_height));
+    let ex = (left + i64::from(dirty_width.unsigned_abs())).clamp(sx, i64::from(source_width));
+    let ey = (top + i64::from(dirty_height.unsigned_abs())).clamp(sy, i64::from(source_height));
+    let clipped_width = (ex - sx) as u32;
+    let clipped_height = (ey - sy) as u32;
     if clipped_width == 0 || clipped_height == 0 {
         return;
     }
+    let (Ok(dx), Ok(dy)) = (
+        i32::try_from(i64::from(dx) + sx),
+        i32::try_from(i64::from(dy) + sy),
+    ) else {
+        return;
+    };
+    let clipped = extract_image_data(
+        &bytes,
+        source_width,
+        source_height,
+        moli_canvas::ImageDataRect::new(
+            sx as i32,
+            sy as i32,
+            clipped_width as i32,
+            clipped_height as i32,
+        ),
+    );
     let source_image = moli_image::RgbaImage {
         width: clipped_width,
         height: clipped_height,
@@ -2067,11 +2087,10 @@ pub(crate) fn canvas_context_get_image_data_callback<'s>(
         rv.set(v8::undefined(scope).into());
         return;
     }
+    let source_x = i64::from(parsed.sx) + i64::from(parsed.sw.min(0));
+    let source_y = i64::from(parsed.sy) + i64::from(parsed.sh.min(0));
     let bytes = if let Some(canvas) = canvas_owner_from_context(scope, args.this()) {
-        canvas_like_pixels_copy(scope, canvas)
-            .map(|(pixels, canvas_width, canvas_height)| {
-                extract_image_data(&pixels, canvas_width, canvas_height, rect)
-            })
+        canvas_like_region_readback(scope, canvas, source_x, source_y, width, height)
             .unwrap_or_else(|| blank_image_data(width, height))
     } else {
         blank_image_data(width, height)
@@ -2167,33 +2186,4 @@ fn normalized_draw_image_args<'s>(
 
 fn blank_image_data(width: u32, height: u32) -> Vec<u8> {
     vec![0; byte_len(width, height).unwrap_or(0)]
-}
-
-/// Clips ImageData bytes to the dirty rect, returning the clipped RGBA8 bytes.
-fn clip_image_data_to_dirty(
-    bytes: &[u8],
-    source_width: u32,
-    source_height: u32,
-    dirty_x: i32,
-    dirty_y: i32,
-    dirty_width: i32,
-    dirty_height: i32,
-) -> Vec<u8> {
-    let src_w = source_width as i32;
-    let src_h = source_height as i32;
-    let sx = dirty_x.max(0).min(src_w);
-    let sy = dirty_y.max(0).min(src_h);
-    let ex = (dirty_x + dirty_width).max(0).min(src_w);
-    let ey = (dirty_y + dirty_height).max(0).min(src_h);
-    let w = (ex - sx).max(0) as usize;
-    let h = (ey - sy).max(0) as usize;
-    let mut out = Vec::with_capacity(w * h * 4);
-    for row in sy as usize..sy as usize + h {
-        let offset = (row * source_width as usize + sx as usize) * 4;
-        let end = offset + w * 4;
-        if end <= bytes.len() {
-            out.extend_from_slice(&bytes[offset..end]);
-        }
-    }
-    out
 }

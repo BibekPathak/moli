@@ -266,7 +266,7 @@ impl CanvasSurface {
     /// freshly allocated buffer. Out-of-canvas regions are filled transparent
     /// (matching `getImageData` semantics). Only the visible intersection is
     /// read, so a small region does not require a full-frame intermediate copy.
-    pub fn readback_region(&self, x: i32, y: i32, width: u32, height: u32) -> Vec<u8> {
+    pub fn readback_region(&self, x: i64, y: i64, width: u32, height: u32) -> Vec<u8> {
         let mut out = vec![0; (width as usize) * (height as usize) * 4];
         if self.is_empty() {
             return out;
@@ -274,13 +274,13 @@ impl CanvasSurface {
         let src_row_stride = self.width as usize * 4;
         let dst_row_stride = width as usize * 4;
         for row in 0..height as usize {
-            let src_y = y + row as i32;
-            if src_y < 0 || src_y >= self.height as i32 {
+            let src_y = y + row as i64;
+            if src_y < 0 || src_y >= i64::from(self.height) {
                 continue;
             }
             for col in 0..width as usize {
-                let src_x = x + col as i32;
-                if src_x < 0 || src_x >= self.width as i32 {
+                let src_x = x + col as i64;
+                if src_x < 0 || src_x >= i64::from(self.width) {
                     continue;
                 }
                 let src_index = (src_y as usize) * src_row_stride + (src_x as usize) * 4;

@@ -28,7 +28,7 @@ const GREEN: Color = Color::new([0.0, 1.0, 0.0, 1.0]);
 
 /// Reads the straight-alpha RGBA8 pixel at (x, y) via a 1x1 region readback.
 fn pixel(surface: &CanvasSurface, x: i32, y: i32) -> [u8; 4] {
-    let bytes = surface.readback_region(x, y, 1, 1);
+    let bytes = surface.readback_region(i64::from(x), i64::from(y), 1, 1);
     [bytes[0], bytes[1], bytes[2], bytes[3]]
 }
 

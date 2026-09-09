@@ -22,7 +22,7 @@ fn rect_path(x: f64, y: f64, w: f64, h: f64) -> BezPath {
 }
 
 fn pixel(surface: &CanvasSurface, x: i32, y: i32) -> [u8; 4] {
-    let bytes = surface.readback_region(x, y, 1, 1);
+    let bytes = surface.readback_region(i64::from(x), i64::from(y), 1, 1);
     [bytes[0], bytes[1], bytes[2], bytes[3]]
 }
 
