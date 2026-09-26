@@ -489,12 +489,10 @@ impl DomHost {
                 if !allow_document {
                     return None;
                 }
-                self.dom.create_node(
-                    super::NodeData::Document(document.clone()),
-                    None,
-                    false,
-                    false,
-                )
+                let mut document = document.clone();
+                document.set_design_mode_enabled(false);
+                self.dom
+                    .create_node(super::NodeData::Document(document), None, false, false)
             }
             super::NodeData::DocumentType(doctype) => {
                 self.create_document_type(doctype.name(), doctype.public_id(), doctype.system_id())
@@ -624,6 +622,24 @@ mod tests {
             current = child;
         }
         depth
+    }
+
+    #[test]
+    fn document_clone_starts_with_design_mode_disabled() {
+        let mut host = test_host();
+        let document = host.document_handle();
+        assert!(host.set_document_design_mode_enabled_for_handle(document, true));
+        for deep in [false, true] {
+            let clone = host.clone_node(document, deep).expect("document clone");
+            assert_eq!(
+                host.document_design_mode_enabled_for_handle(clone),
+                Some(false)
+            );
+        }
+        assert_eq!(
+            host.document_design_mode_enabled_for_handle(document),
+            Some(true)
+        );
     }
 
     #[test]

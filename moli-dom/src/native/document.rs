@@ -51,6 +51,7 @@ pub struct Document {
     ready_state: DocumentReadyState,
     quirks_mode: QuirksMode,
     kind: DocumentKind,
+    design_mode_enabled: bool,
     css_target: Option<NativeNodeId>,
     default_language: Option<Box<str>>,
     source_last_modified_ms: Option<f64>,
@@ -70,6 +71,7 @@ impl Document {
             ready_state: DocumentReadyState::Complete,
             quirks_mode: QuirksMode::NoQuirks,
             kind: DocumentKind::Html,
+            design_mode_enabled: false,
             css_target: None,
             default_language: None,
             source_last_modified_ms: None,
@@ -84,6 +86,7 @@ impl Document {
             ready_state: DocumentReadyState::Complete,
             quirks_mode: QuirksMode::NoQuirks,
             kind: DocumentKind::Xml,
+            design_mode_enabled: false,
             css_target: None,
             default_language: None,
             source_last_modified_ms: None,
@@ -126,6 +129,10 @@ impl Document {
         self.kind == DocumentKind::Html
     }
 
+    pub fn design_mode_enabled(&self) -> bool {
+        self.design_mode_enabled
+    }
+
     pub fn fallback_base_url(&self) -> &Url {
         self.base_url_state.fallback_base_url()
     }
@@ -157,6 +164,10 @@ impl Document {
 
     pub fn set_content_type(&mut self, content_type: impl Into<String>) {
         self.content_type = content_type.into().into_boxed_str();
+    }
+
+    pub fn set_design_mode_enabled(&mut self, design_mode_enabled: bool) {
+        self.design_mode_enabled = design_mode_enabled;
     }
 
     pub fn set_css_target(&mut self, target: Option<NativeNodeId>) -> bool {
