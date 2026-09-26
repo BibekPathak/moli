@@ -1890,3 +1890,15 @@ fn report_error_uses_the_receiver_realm_without_observing_exception_getters() {
         r#"{"topEvents":0,"eventCount":2,"exactErrors":[true,true],"receiverRealm":true,"messagesAreNonEmpty":true,"getterCalls":0,"missingArgumentError":"TypeError","detachedCallCompleted":true}"#,
     );
 }
+
+#[test]
+fn selection_range_membership_uses_native_document_relationships() {
+    let mut vm = new_storage_test_vm("https://selection-native-membership.test/");
+    assert_eq!(
+        vm.eval(include_str!(
+            "../../../../../tests/fixtures/selection-native-membership.js"
+        ))
+        .expect("selection membership should ignore author relationship properties"),
+        ""
+    );
+}
