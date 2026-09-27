@@ -180,10 +180,12 @@ impl DocumentRuntime {
                 push_unique_handle(&mut plan.pictures, new_parent);
             }
             let old_parent = self.dom_host.parent_node(root);
-            if let Some(old_parent) = old_parent
-                && self.dom_host.is_html_element_named(old_parent, "picture")
-            {
-                push_unique_handle(&mut plan.pictures, old_parent);
+            if let Some(old_parent) = old_parent {
+                let removal_plan =
+                    self.image_relevant_mutation_plan_before_remove(old_parent, root);
+                for image in removal_plan.images {
+                    push_unique_handle(&mut plan.images, image);
+                }
             }
             if root_is_img
                 && (new_parent_is_picture
@@ -222,7 +224,38 @@ impl DocumentRuntime {
         plan
     }
 
-    fn queue_image_relevant_mutation_loads(
+    pub(super) fn image_relevant_mutation_plan_before_remove(
+        &self,
+        parent: DomHandle,
+        root: DomHandle,
+    ) -> ImageRelevantMutationPlan {
+        if !self.dom_host.is_html_element_named(parent, "picture") {
+            return ImageRelevantMutationPlan::default();
+        }
+        if self.dom_host.is_html_element_named(root, "source") {
+            return ImageRelevantMutationPlan {
+                pictures: Vec::new(),
+                images: self
+                    .dom_host
+                    .child_handles(parent)
+                    .skip_while(|&child| child != root)
+                    .skip(1)
+                    .filter(|&child| self.dom_host.is_html_element_named(child, "img"))
+                    .collect(),
+            };
+        }
+        ImageRelevantMutationPlan {
+            pictures: Vec::new(),
+            images: self
+                .dom_host
+                .is_html_element_named(root, "img")
+                .then_some(root)
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    pub(super) fn queue_image_relevant_mutation_loads(
         &self,
         scope: &mut v8::PinScope<'_, '_>,
         host_ptr: *mut JsContextHost,
@@ -334,28 +367,6 @@ impl DocumentRuntime {
                 removal_plan.parent,
                 "src",
             );
-        }
-
-        if !self
-            .dom_host
-            .is_html_element_named(removal_plan.root, "source")
-            || !self
-                .dom_host
-                .is_html_element_named(removal_plan.parent, "picture")
-        {
-            return;
-        }
-        let image = self
-            .dom_host
-            .child_handles(removal_plan.parent)
-            .into_iter()
-            .find(|child| self.dom_host.is_html_element_named(*child, "img"));
-        if let Some(image) = image {
-            crate::native_bridge::element::reset_image_load_dispatch(
-                unsafe { &mut *host_ptr },
-                image,
-            );
-            crate::native_bridge::element::queue_image_load_event_if_needed(scope, host_ptr, image);
         }
     }
 

@@ -1094,3 +1094,113 @@ async fn changing_picture_source_restarts_intercepted_image_request() {
         "load:https://example.test/second.png:1"
     );
 }
+
+#[tokio::test]
+async fn picture_source_and_image_tree_mutations_reselect_requests() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    loader.set_image_fetch_enabled(true);
+    let mut vm = new_storage_page_task_executor_test_vm_with_loader(
+        "https://picture-source-removal.test/page.html",
+        &loader,
+    );
+    vm.set_fetch_subresource_interception(true, Some(crate::types::SubresourceResourceType::Image));
+
+    vm.eval(
+        r#"
+        (() => {
+          if (!document.documentElement) {
+            document.append(document.createElement("html"));
+          }
+          if (!document.body) {
+            document.documentElement.append(document.createElement("body"));
+          }
+          const picture = document.createElement("picture");
+          const source1 = document.createElement("source");
+          const source2 = document.createElement("source");
+          const source3 = document.createElement("source");
+          const source4 = document.createElement("source");
+          const source5 = document.createElement("source");
+          const middleSource = document.createElement("source");
+          const image1 = document.createElement("img");
+          const image2 = document.createElement("img");
+          source1.srcset = "s1.png";
+          source2.srcset = "s2.png";
+          source3.srcset = "s3.png";
+          source4.srcset = "s4.png";
+          source5.srcset = "s5.png";
+          middleSource.srcset = "middle.png";
+          image1.src = "img1.png";
+          image2.src = "img2.png";
+          picture.append(source1, source2, source3, image1, middleSource, image2, source4, source5);
+          const host = document.body;
+          host.append(picture);
+          globalThis.__pictureSourceMutation = {
+            host,
+            picture,
+            source1,
+            source2,
+            source3,
+            source4,
+            source5,
+            middleSource,
+            image1,
+            image2
+          };
+        })()
+        "#,
+    )
+    .expect("picture source mutation setup should evaluate");
+
+    let cases: &[(&str, &[&str])] = &[
+        ("", &["s1.png", "s1.png"]),
+        ("source1.remove()", &["s2.png", "s2.png"]),
+        ("source2.remove()", &["s3.png", "s3.png"]),
+        (
+            "host.append(__pictureSourceMutation.source3)",
+            &["img1.png", "middle.png"],
+        ),
+        ("middleSource.remove()", &["img2.png"]),
+        ("source4.remove()", &[]),
+        ("host.append(__pictureSourceMutation.source5)", &[]),
+        (
+            "picture.prepend(__pictureSourceMutation.source2)",
+            &["s2.png", "s2.png"],
+        ),
+        (
+            "picture.prepend(__pictureSourceMutation.source1)",
+            &["s1.png", "s1.png"],
+        ),
+        (
+            "source1.replaceWith(document.createElement('div'))",
+            &["s2.png", "s2.png"],
+        ),
+        ("image1.remove()", &["img1.png"]),
+    ];
+    for (mutation, expected_sources) in cases {
+        if !mutation.is_empty() {
+            vm.eval(&format!("__pictureSourceMutation.{mutation}"))
+                .expect("picture tree mutation should evaluate");
+        }
+        let mut requested_sources = vm
+            .take_pending_subresource_fetch_infos()
+            .into_iter()
+            .map(|request| {
+                assert_eq!(
+                    request.resource_type,
+                    crate::types::SubresourceResourceType::Image
+                );
+                request.url.to_string()
+            })
+            .collect::<Vec<_>>();
+        requested_sources.sort();
+        let mut expected_sources = expected_sources
+            .iter()
+            .map(|source| format!("https://picture-source-removal.test/{source}"))
+            .collect::<Vec<_>>();
+        expected_sources.sort();
+        assert_eq!(
+            requested_sources, expected_sources,
+            "mutation: {mutation:?}"
+        );
+    }
+}
