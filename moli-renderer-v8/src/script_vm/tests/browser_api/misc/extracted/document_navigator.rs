@@ -320,3 +320,31 @@ fn navigator_permissions_background_sync_defaults_granted_and_tracks_overrides()
         .expect("background-sync permission denied promise should settle");
     assert_eq!(result, "true|background-sync|denied");
 }
+
+#[test]
+fn geometry_exposes_svg_point_as_a_legacy_window_alias() {
+    let mut vm = new_storage_test_vm("https://geometry-svg-point-alias.test/");
+    let result = vm.eval(r#"
+(() => {
+  const assert = (condition, message) => { if (!condition) throw new Error(message); };
+  assert(SVGPoint === DOMPoint, "legacy alias constructor identity");
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "SVGPoint");
+  assert(descriptor.value === DOMPoint && descriptor.writable && !descriptor.enumerable && descriptor.configurable, "global alias descriptor");
+  const point = new SVGPoint(1, 2);
+  assert(Object.getPrototypeOf(point) === DOMPoint.prototype, "prototype identity");
+  assert(point.x === 1 && point.y === 2 && point.z === 0 && point.w === 1, "constructor values");
+  point.x = 3;
+  const serialized = DOMPoint.prototype.toJSON.call(point);
+  assert(serialized.x === 3 && serialized.y === 2 && serialized.z === 0 && serialized.w === 1, "alias produces a branded DOMPoint with native slots");
+  const copied = SVGPoint.fromPoint(point);
+  assert(Object.getPrototypeOf(copied) === DOMPoint.prototype && copied.x === 3 && copied.y === 2, "alias static factory");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M 1 2 L 3 4");
+  const created = path.getPointAtLength(0);
+  assert(created instanceof SVGPoint && created instanceof DOMPoint, "SVG factory uses the same interface");
+  assert(Object.getPrototypeOf(created) === SVGPoint.prototype, "SVG factory prototype");
+  return "ok";
+})()
+"#).expect("SVGPoint should alias the native DOMPoint interface");
+    assert_eq!(result, "ok");
+}
