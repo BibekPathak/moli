@@ -262,7 +262,7 @@ struct DomMatrixReadOnlyPrototypeAccessorsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::DOMMatrixReadOnly)]
+#[webapi(interface = web_api_interfaces::DOMMatrixReadOnly, enumerable)]
 struct DomMatrixReadOnlyPrototypeMethodsDeclaration {
     #[webapi(method = "toJSON", enumerable, callback = dom_matrix_to_json_callback)]
     to_json: (),
@@ -320,7 +320,7 @@ struct DomMatrixReadOnlyPrototypeMethodsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::DOMMatrixReadOnly)]
+#[webapi(interface = web_api_interfaces::DOMMatrixReadOnly, enumerable)]
 struct DomMatrixReadOnlyConstructorDeclaration {
     #[webapi(
         static_method = "fromMatrix",
@@ -394,7 +394,7 @@ struct DomMatrixPrototypeAccessorsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::DOMMatrix)]
+#[webapi(interface = web_api_interfaces::DOMMatrix, enumerable)]
 struct DomMatrixPrototypeMethodsDeclaration {
     #[webapi(method = "translateSelf", callback = dom_matrix_translate_self_callback)]
     translate_self: (),
@@ -435,12 +435,12 @@ struct DomMatrixPrototypeMethodsDeclaration {
     #[webapi(method = "invertSelf", callback = dom_matrix_invert_self_callback)]
     invert_self: (),
 
-    #[webapi(method = "setMatrixValue", callback = dom_matrix_set_matrix_value_callback)]
+    #[webapi(method = "setMatrixValue", length = 1, callback = dom_matrix_set_matrix_value_callback)]
     set_matrix_value: (),
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::DOMMatrix)]
+#[webapi(interface = web_api_interfaces::DOMMatrix, enumerable)]
 struct DomMatrixConstructorDeclaration {
     #[webapi(
         static_method = "fromMatrix",

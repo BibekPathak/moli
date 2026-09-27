@@ -1851,3 +1851,40 @@ fn notification_declared_surface_uses_private_slots_and_methods() {
         "none|title:function:get title:0:undefined:true:true,data:function:get data:0:undefined:true:true,actions:function:get actions:0:undefined:true:true|real|42|0|throw:TypeError,throw:TypeError,throw:TypeError,throw:TypeError,throw:TypeError,throw:TypeError,throw:TypeError,throw:TypeError,throw:TypeError,throw:TypeError|throw:TypeError,throw:TypeError,throw:TypeError|true|true:true:true:true:function:0:requestPermission|true|true:true:true:true:function:0:addEventListener|true:true:true:true:function:0:removeEventListener|true:true:true:true:function:0:dispatchEvent|true|listener"
     );
 }
+
+#[test]
+fn dom_matrix_window_operations_use_webidl_descriptors() {
+    let mut vm = new_storage_test_vm("https://dommatrix-operation-descriptors.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const descriptorShape = (owner, name) => {
+    const descriptor = Object.getOwnPropertyDescriptor(owner, name);
+    return [
+      typeof descriptor.value,
+      descriptor.value.length,
+      descriptor.enumerable,
+      descriptor.writable,
+      descriptor.configurable
+    ].join(",");
+  };
+  return [
+    descriptorShape(DOMMatrixReadOnly.prototype, "toString"),
+    descriptorShape(DOMMatrix.prototype, "setMatrixValue"),
+    descriptorShape(DOMMatrixReadOnly, "fromMatrix"),
+    descriptorShape(DOMMatrixReadOnly, "fromFloat32Array"),
+    descriptorShape(DOMMatrix, "fromMatrix"),
+    descriptorShape(DOMMatrix, "fromFloat64Array")
+  ].join("|");
+})()
+"#,
+        )
+        .expect("DOMMatrix Window operation descriptors should evaluate");
+
+    assert_eq!(
+        result,
+        "function,0,true,true,true|function,1,true,true,true|function,0,true,true,true|function,1,true,true,true|function,0,true,true,true|function,1,true,true,true"
+    );
+}
