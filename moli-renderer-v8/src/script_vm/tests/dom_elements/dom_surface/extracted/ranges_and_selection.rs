@@ -885,3 +885,130 @@ fn cdata_split_text_preserves_cdata_node_type_and_updates_ranges() {
 
     assert_eq!(result, "ab|cd|4|true|true|2|true|1|true|2");
 }
+
+#[test]
+fn svg_svg_element_deselect_all_clears_the_owner_document_selection() {
+    let mut vm = new_parsed_test_vm(
+        "https://svg-deselect-all.test/",
+        "<!doctype html><html><head></head><body></body></html>",
+    );
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              const assert = (condition, message) => {
+                if (!condition) throw new Error(message);
+              };
+              const svgNamespace = "http://www.w3.org/2000/svg";
+              const outer = document.createElementNS(svgNamespace, "svg");
+              const inner = document.createElementNS(svgNamespace, "svg");
+              const svgText = document.createElementNS(svgNamespace, "text");
+              const htmlText = document.createElement("p");
+              svgText.textContent = "SVG selection";
+              htmlText.textContent = "HTML selection";
+              inner.appendChild(svgText);
+              outer.appendChild(inner);
+              document.body.append(outer, htmlText);
+
+              const descriptor = Object.getOwnPropertyDescriptor(
+                SVGSVGElement.prototype,
+                "deselectAll"
+              );
+              assert(!!descriptor, "deselectAll descriptor");
+              assert(typeof descriptor.value === "function", "deselectAll function");
+              assert(descriptor.value.name === "deselectAll", "deselectAll name");
+              assert(descriptor.value.length === 0, "deselectAll length");
+              assert(descriptor.enumerable && descriptor.writable && descriptor.configurable,
+                "deselectAll descriptor flags");
+
+              const selection = window.getSelection();
+              const select = node => {
+                const range = document.createRange();
+                range.selectNodeContents(node);
+                selection.removeAllRanges();
+                selection.addRange(range);
+                assert(selection.rangeCount === 1, "selection precondition");
+              };
+
+              outer.deselectAll();
+              assert(selection.rangeCount === 0 && selection.isCollapsed,
+                "empty selection stays empty");
+
+              select(svgText);
+              outer.deselectAll();
+              assert(selection.rangeCount === 0 && selection.isCollapsed,
+                "outer svg clears SVG selection");
+
+              select(htmlText);
+              inner.deselectAll();
+              assert(selection.rangeCount === 0 && selection.isCollapsed,
+                "inner svg clears selection outside its subtree");
+
+              select(svgText);
+              const originalDocumentGetSelection = document.getSelection;
+              const originalRemoveAllRanges = Selection.prototype.removeAllRanges;
+              document.getSelection = () => { throw new Error("observable getSelection call"); };
+              Selection.prototype.removeAllRanges = () => {
+                throw new Error("observable removeAllRanges call");
+              };
+              Object.defineProperty(outer, "ownerDocument", {
+                value: null,
+                configurable: true
+              });
+              Object.defineProperty(document, "defaultView", {
+                value: null,
+                configurable: true
+              });
+              try {
+                outer.deselectAll();
+              } finally {
+                delete outer.ownerDocument;
+                delete document.defaultView;
+                document.getSelection = originalDocumentGetSelection;
+                Selection.prototype.removeAllRanges = originalRemoveAllRanges;
+              }
+              assert(selection.rangeCount === 0, "deselectAll uses internal selection state");
+
+              let borrowed = "returned";
+              try {
+                descriptor.value.call(document.createElement("div"));
+              } catch (error) {
+                borrowed = error && error.name;
+              }
+              assert(borrowed === "TypeError", "deselectAll receiver brand");
+
+              const revoked = Proxy.revocable(outer, {});
+              revoked.revoke();
+              for (const receiver of [Object.create(outer), new Proxy(outer, {}), revoked.proxy]) {
+                let caught;
+                try { descriptor.value.call(receiver); } catch (error) { caught = error; }
+                assert(caught instanceof TypeError, "deselectAll rejects forged and author Proxy receivers");
+              }
+
+              const frame = document.body.appendChild(document.createElement("iframe"));
+              const child = frame.contentDocument;
+              const childSvg = child.body.appendChild(child.createElementNS(svgNamespace, "svg"));
+              const childText = childSvg.appendChild(child.createTextNode("child selection"));
+              const childRange = child.createRange();
+              childRange.selectNodeContents(childText);
+              frame.contentWindow.getSelection().addRange(childRange);
+              select(htmlText);
+              descriptor.value.call(childSvg);
+              assert(frame.contentWindow.getSelection().rangeCount === 0,
+                "borrowed method clears the receiver document selection");
+              assert(selection.rangeCount === 1,
+                "borrowed method preserves the callee document selection");
+              frame.remove();
+
+              const detachedDocument = document.implementation.createHTMLDocument("");
+              const detachedSvg = detachedDocument.createElementNS(svgNamespace, "svg");
+              detachedSvg.deselectAll();
+              return "ok";
+            })()
+            "#,
+        )
+        .expect("SVGSVGElement.deselectAll should evaluate");
+
+    assert_eq!(result, "ok");
+}
