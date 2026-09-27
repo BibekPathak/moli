@@ -664,7 +664,11 @@ fn auto_direction_for_element(host: &DomHost, root: NodeId) -> Option<CssDirecti
 }
 
 fn descendant_is_directionally_isolated_for_auto(element: &Element) -> bool {
-    if element.is_html_element("bdi") {
+    if matches!(
+        element.local_name(),
+        "bdi" | "script" | "style" | "textarea"
+    ) && element.namespace() == "http://www.w3.org/1999/xhtml"
+    {
         return true;
     }
     element.attribute("dir").is_some_and(|value| {

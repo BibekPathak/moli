@@ -1452,6 +1452,35 @@ mod tests {
     }
 
     #[test]
+    fn dir_auto_ignores_directionally_isolated_html_descendants() {
+        for local_name in ["script", "style", "textarea", "bdi", "span"] {
+            let url = url::Url::parse("https://example.test/").unwrap();
+            let mut host = DomHost::from_dom(NativeDom::new_html(url));
+            host.reset_html_document_shell();
+            let body = host.document_body_handle().unwrap();
+            let parent = host.create_element("div");
+            let descendant = host.create_element(local_name);
+            let latin = host.create_text_node("A");
+            let hebrew = host.create_text_node("\u{05ea}");
+            assert!(host.set_attribute(parent, "dir", "auto"));
+            assert!(host.append_child(descendant, latin));
+            assert!(host.append_child(parent, descendant));
+            assert!(host.append_child(parent, hebrew));
+            assert!(host.append_child(body, parent));
+            let engine = QueryEngine;
+            assert_eq!(
+                engine.matches_host(&host, parent, ":dir(rtl)").unwrap(),
+                local_name != "span",
+                "{local_name} must use its HTML auto-direction isolation rule"
+            );
+            assert_eq!(
+                engine.matches_host(&host, parent, ":dir(ltr)").unwrap(),
+                local_name == "span"
+            );
+        }
+    }
+
+    #[test]
     fn dom_api_selectors_dir_auto_uses_first_strong_text() {
         let url = url::Url::parse("https://example.test/").unwrap();
         let mut host = DomHost::from_dom(NativeDom::new_html(url));
