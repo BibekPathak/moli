@@ -434,6 +434,53 @@ struct SvgTextContentElementTemplateMethodsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::SVGUnitTypes, enumerable)]
+struct SvgUnitTypesTemplateConstantsDeclaration {
+    #[webapi(constant = "SVG_UNIT_TYPE_UNKNOWN", value = SVG_UNIT_TYPE_UNKNOWN)]
+    unknown: (),
+
+    #[webapi(
+        constant = "SVG_UNIT_TYPE_USERSPACEONUSE",
+        value = SVG_UNIT_TYPE_USER_SPACE_ON_USE
+    )]
+    user_space_on_use: (),
+
+    #[webapi(
+        constant = "SVG_UNIT_TYPE_OBJECTBOUNDINGBOX",
+        value = SVG_UNIT_TYPE_OBJECT_BOUNDING_BOX
+    )]
+    object_bounding_box: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::SVGGradientElement, enumerable)]
+struct SvgGradientElementTemplateConstantsDeclaration {
+    #[webapi(
+        constant = "SVG_SPREADMETHOD_UNKNOWN",
+        value = SVG_SPREAD_METHOD_UNKNOWN
+    )]
+    spread_method_unknown: (),
+
+    #[webapi(
+        constant = "SVG_SPREADMETHOD_PAD",
+        value = SVG_SPREAD_METHOD_PAD
+    )]
+    spread_method_pad: (),
+
+    #[webapi(
+        constant = "SVG_SPREADMETHOD_REFLECT",
+        value = SVG_SPREAD_METHOD_REFLECT
+    )]
+    spread_method_reflect: (),
+
+    #[webapi(
+        constant = "SVG_SPREADMETHOD_REPEAT",
+        value = SVG_SPREAD_METHOD_REPEAT
+    )]
+    spread_method_repeat: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
 #[webapi(interface = web_api_interfaces::SVGSVGElement, enumerable)]
 struct SvgSvgElementTemplateMethodsDeclaration {
     #[webapi(
@@ -964,6 +1011,24 @@ pub(super) fn install_svg_animated_enumeration_bindings<'s>(
 ) {
     let proto = template.prototype_template(scope);
     SvgAnimatedEnumerationTemplateAccessorsDeclaration::initialize_prototype_template(scope, proto);
+}
+
+pub(super) fn install_svg_unit_types_bindings<'s>(
+    scope: &mut v8::PinScope<'s, '_, ()>,
+    template: v8::Local<'s, v8::FunctionTemplate>,
+) {
+    let prototype = template.prototype_template(scope);
+    SvgUnitTypesTemplateConstantsDeclaration::initialize_template(scope, template);
+    SvgUnitTypesTemplateConstantsDeclaration::initialize_prototype_template(scope, prototype);
+}
+
+pub(super) fn install_svg_gradient_element_bindings<'s>(
+    scope: &mut v8::PinScope<'s, '_, ()>,
+    template: v8::Local<'s, v8::FunctionTemplate>,
+) {
+    let prototype = template.prototype_template(scope);
+    SvgGradientElementTemplateConstantsDeclaration::initialize_template(scope, template);
+    SvgGradientElementTemplateConstantsDeclaration::initialize_prototype_template(scope, prototype);
 }
 
 pub(super) fn install_svg_value_list_bindings<'s>(

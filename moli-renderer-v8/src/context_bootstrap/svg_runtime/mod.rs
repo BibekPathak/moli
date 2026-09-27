@@ -240,6 +240,15 @@ const SVG_LENGTH_ADJUST_UNKNOWN: u32 = 0;
 const SVG_LENGTH_ADJUST_SPACING: u32 = 1;
 const SVG_LENGTH_ADJUST_SPACING_AND_GLYPHS: u32 = 2;
 
+const SVG_UNIT_TYPE_UNKNOWN: u32 = 0;
+const SVG_UNIT_TYPE_USER_SPACE_ON_USE: u32 = 1;
+const SVG_UNIT_TYPE_OBJECT_BOUNDING_BOX: u32 = 2;
+
+const SVG_SPREAD_METHOD_UNKNOWN: u32 = 0;
+const SVG_SPREAD_METHOD_PAD: u32 = 1;
+const SVG_SPREAD_METHOD_REFLECT: u32 = 2;
+const SVG_SPREAD_METHOD_REPEAT: u32 = 3;
+
 pub(in crate::context_bootstrap) fn install_svg_template_bindings<'s>(
     scope: &mut v8::PinScope<'s, '_, ()>,
     template: v8::Local<'s, v8::FunctionTemplate>,
@@ -260,6 +269,8 @@ pub(in crate::context_bootstrap) fn install_svg_template_bindings<'s>(
         "SVGAnimatedNumberList" => {
             bindings::install_svg_animated_number_list_bindings(scope, template)
         }
+        "SVGUnitTypes" => bindings::install_svg_unit_types_bindings(scope, template),
+        "SVGGradientElement" => bindings::install_svg_gradient_element_bindings(scope, template),
         "SVGAnimatedEnumeration" => {
             bindings::install_svg_animated_enumeration_bindings(scope, template)
         }

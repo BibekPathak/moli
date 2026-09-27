@@ -1,6 +1,37 @@
 use super::*;
 
 #[test]
+fn svg_enumeration_constants_have_webidl_descriptors() {
+    let mut vm = new_storage_test_vm("https://svg-enumeration-constants.test/");
+    let result = vm.eval(r#"
+(() => {
+  const assert = (condition, message) => { if (!condition) throw new Error(message); };
+  const groups = [
+    [SVGUnitTypes, [["SVG_UNIT_TYPE_UNKNOWN", 0], ["SVG_UNIT_TYPE_USERSPACEONUSE", 1], ["SVG_UNIT_TYPE_OBJECTBOUNDINGBOX", 2]]],
+    [SVGGradientElement, [["SVG_SPREADMETHOD_UNKNOWN", 0], ["SVG_SPREADMETHOD_PAD", 1], ["SVG_SPREADMETHOD_REFLECT", 2], ["SVG_SPREADMETHOD_REPEAT", 3]]],
+  ];
+  for (const [constructor, constants] of groups) {
+    for (const owner of [constructor, constructor.prototype]) {
+      for (const [name, value] of constants) {
+        const descriptor = Object.getOwnPropertyDescriptor(owner, name);
+        assert(descriptor && descriptor.value === value, name + " value");
+        assert(descriptor.enumerable && !descriptor.configurable && !descriptor.writable, name + " descriptor");
+      }
+    }
+    let caught;
+    try { new constructor(); } catch (error) { caught = error; }
+    assert(caught instanceof TypeError, constructor.name + " illegal constructor");
+  }
+  const gradient = document.createElementNS("http://www.w3.org/2000/svg", "linearGradient");
+  assert(gradient.SVG_SPREADMETHOD_REPEAT === 3, "gradient inherits constants");
+  assert(SVGLinearGradientElement.SVG_SPREADMETHOD_REPEAT === 3, "constructor inherits constants");
+  return "ok";
+})()
+"#).expect("SVG enumeration constants should use WebIDL descriptors");
+    assert_eq!(result, "ok");
+}
+
+#[test]
 fn svg_specialized_accessors_live_on_owner_prototypes() {
     let mut vm = new_parsed_test_vm(
         "https://svg-specialized-prototype.test/",
