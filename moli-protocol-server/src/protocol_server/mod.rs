@@ -38,6 +38,7 @@ pub use crate::config::ServerConfig;
 mod cdp;
 mod cdp_agent_host;
 mod cdp_owner;
+pub(crate) mod cdp_shutdown;
 mod cdp_socket;
 mod protocol_local_executor;
 mod tcp_options;
@@ -47,6 +48,7 @@ mod webdriver_files;
 
 use cdp_agent_host::SharedCdpAgentHostDirectory;
 use cdp_owner::SharedCdpOwnerRegistry;
+use cdp_shutdown::ShutdownCoordinator;
 use webdriver_bidi::SharedBidiSessionRegistry;
 use webdriver_classic::SharedClassicSessionRegistry;
 
@@ -172,6 +174,7 @@ impl ProtocolServer {
         )?;
 
         let cdp_owner_registry = app_state.cdp_owner_registry.clone();
+        let shutdown_coordinator = app_state.shutdown_coordinator.clone();
         let app = build_router(app_state);
 
         let listener = listener.tap_io(|tcp_stream| {
@@ -779,6 +782,7 @@ struct AppState {
     classic_session_registry: SharedClassicSessionRegistry,
     cdp_agent_host_directory: SharedCdpAgentHostDirectory,
     cdp_owner_registry: SharedCdpOwnerRegistry,
+    shutdown_coordinator: ShutdownCoordinator,
     devtools_frontend_url: String,
     cookie_profile: SharedCookieProfile,
     storage_partition: Arc<StoragePartitionState>,
@@ -835,6 +839,7 @@ impl AppState {
         let cdp_agent_host_directory = SharedCdpAgentHostDirectory::default();
         let cdp_target_id_allocator = Arc::new(AtomicU64::new(0));
         let cdp_tab_target_id_allocator = Arc::new(AtomicU64::new(0));
+        let shutdown_coordinator = ShutdownCoordinator::new();
         let cdp_owner_registry = SharedCdpOwnerRegistry::new(
             cdp_agent_host_directory.clone(),
             cdp_target_id_allocator,
@@ -843,6 +848,7 @@ impl AppState {
             storage_partition.clone(),
             navigation_runtime_config.clone(),
             screencast_interval_ms,
+            shutdown_coordinator.clone(),
         );
         Self {
             browser_ws_url: format!("ws://{addr}/devtools/browser/{DEFAULT_BROWSER_ID}"),
@@ -852,6 +858,7 @@ impl AppState {
             classic_session_registry: SharedClassicSessionRegistry::default(),
             cdp_agent_host_directory,
             cdp_owner_registry,
+            shutdown_coordinator,
             devtools_frontend_url: format!(
                 "/devtools/inspector.html?ws={addr}/devtools/page/{DEFAULT_TARGET_ID}"
             ),
