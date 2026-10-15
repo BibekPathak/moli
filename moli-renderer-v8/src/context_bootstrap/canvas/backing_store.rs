@@ -17,7 +17,6 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use crate::util::{get_private_object, get_private_value, set_private_value};
-use crate::webidl;
 use crate::{
     document_runtime::DomHandle,
     native_bridge::{JsContextHost, node_runtime_and_handle_from_object_or_detached},
@@ -185,9 +184,9 @@ pub(super) fn canvas_like_region_readback<'s>(
     Some(surface.readback_region(x, y, width, height))
 }
 
-/// Flushes any pending recording for `canvas` against its surface, then publishes
-/// the snapshot. This must be called before any pixel observation (getImageData,
-/// toDataURL, drawImage from canvas source, page painting, screencast).
+/// Executes pending drawing against the native surface without publishing a
+/// full-image snapshot. Pixel readers can then observe only their requested
+/// region; page painting publishes the surface separately.
 pub(super) fn flush_canvas_recording<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     canvas: v8::Local<'s, v8::Object>,
@@ -202,9 +201,6 @@ pub(super) fn flush_canvas_recording<'s>(
             return;
         }
     }
-    // Release the recording borrow before calling canvas_like_dimensions() which
-    // may read JS properties and re-enter user code.  A width getter that calls
-    // ctx.fillRect() once would trigger "RefCell already borrowed" and abort.
     let (width, height) = match canvas_like_dimensions(scope, canvas) {
         Some(dims) => dims,
         None => {
@@ -227,7 +223,6 @@ pub(super) fn flush_canvas_recording<'s>(
         let _ = rec.execute(surface);
         rec.clear();
     }
-    publish_canvas_snapshot(scope, canvas);
 }
 
 pub(super) fn canvas_2d_context<'s>(
@@ -295,6 +290,14 @@ pub(super) fn canvas_surface_cell<'s>(
     surface
 }
 
+#[cfg(test)]
+pub(crate) fn canvas_surface_for_test<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    canvas: v8::Local<'s, v8::Object>,
+) -> SurfaceCell {
+    canvas_surface_cell(scope, canvas)
+}
+
 /// Materializes the surface cell at `width` x `height`, resizing (and resetting
 /// content) only when the dimensions change. Same-size access preserves content.
 /// Returns `false` when the dimensions exceed the budget, leaving no surface.
@@ -350,19 +353,25 @@ pub(super) fn publish_canvas_snapshot<'s>(
         return;
     };
     let cell = canvas_surface_cell(scope, canvas);
-    let Some(snapshot) = cell
-        .borrow_mut()
-        .as_mut()
-        .and_then(|surface| surface.snapshot().ok())
-    else {
-        return;
+    let snapshot = {
+        let mut surface = cell.borrow_mut();
+        let Some(surface) = surface.as_mut().filter(|surface| surface.is_dirty()) else {
+            return;
+        };
+        let Ok(snapshot) = surface.snapshot() else {
+            return;
+        };
+        snapshot
     };
-    let _ = unsafe { &mut *runtime_ptr }.replace_canvas_pixels(
+    if unsafe { &mut *runtime_ptr }.replace_canvas_pixels(
         handle,
         snapshot.width,
         snapshot.height,
         snapshot.rgba.clone(),
-    );
+    ) && let Some(surface) = cell.borrow_mut().as_mut()
+    {
+        surface.mark_clean();
+    }
 }
 
 /// Marks a canvas dirty after a draw is recorded AND flushes its pending
@@ -401,23 +410,20 @@ pub(super) fn canvas_like_dimensions<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     canvas: v8::Local<'s, v8::Object>,
 ) -> Option<(u32, u32)> {
-    let width = canvas_like_dimension(scope, canvas, super::OFFSCREEN_CANVAS_WIDTH_SLOT, "width")?;
-    let height =
-        canvas_like_dimension(scope, canvas, super::OFFSCREEN_CANVAS_HEIGHT_SLOT, "height")?;
-    Some((width, height))
-}
-
-fn canvas_like_dimension<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    canvas: v8::Local<'s, v8::Object>,
-    slot: &str,
-    public_name: &'static str,
-) -> Option<u32> {
-    let value = get_private_value(scope, canvas, slot)
-        .and_then(|value| value.number_value(scope))
-        .or_else(|| webidl::optional_number_property(scope, canvas, public_name))
-        .unwrap_or(0.0);
-    Some(value.max(0.0).trunc() as u32)
+    let width = get_private_value(scope, canvas, super::OFFSCREEN_CANVAS_WIDTH_SLOT)
+        .and_then(|value| v8::Local::<v8::Number>::try_from(value).ok());
+    let height = get_private_value(scope, canvas, super::OFFSCREEN_CANVAS_HEIGHT_SLOT)
+        .and_then(|value| v8::Local::<v8::Number>::try_from(value).ok());
+    if let (Some(width), Some(height)) = (width, height) {
+        return Some((width.value() as u32, height.value() as u32));
+    }
+    html_canvas_identity(scope, canvas)?;
+    // Use the same native DOM attribute parsing as the reflected accessors.
+    // Reading public width/height properties could execute author getters.
+    Some((
+        crate::native_bridge::element::html_canvas_dimension_value(scope, canvas, "width", 300),
+        crate::native_bridge::element::html_canvas_dimension_value(scope, canvas, "height", 150),
+    ))
 }
 
 #[cfg(test)]

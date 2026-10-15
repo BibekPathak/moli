@@ -221,36 +221,39 @@ cargo test -p moli-canvas --test baseline_cost -- --nocapture
 M5 verified and hardened the flush/read/invalidation contract:
 
 - **Read/flush consistency**: All R routes flush before reading. `getImageData`
-  reads via `canvas_like_pixels_copy` (flushes per-canvas recording first);
-  `toDataURL` reads via `canvas_like_to_data_url` (same path); `drawImage` from
+  reads via `canvas_like_region_readback`, executing pending commands without
+  creating or publishing a full-image snapshot. `toDataURL` reads via
+  `canvas_like_to_data_url` (full-image snapshot); `drawImage` from
   canvas source flushes the source; page painting (`canvas_pixels_for_layout`)
   reads the published `Arc<RgbaImage>` snapshot; screencast (`capture_screencast_frame_with_before_layout`)
   and screenshot (`capture_screenshot`) both call `flush_all_recordings` (via
   `with_default_context_scope`) before computing `visual_state_before`; layout
-  (`with_fresh_layout_pass`) flushes at the start of every layout pass.
+  (`with_fresh_layout_pass`) flushes at the start of every layout pass. Page
+  painting also publishes dirty surfaces whose commands were already executed
+  by a region readback, and reuses clean published images.
 - **Snapshot cache invalidation**: `CanvasSurface::published` (the cached
   straight-alpha `Arc<RgbaImage>`) is set to `None` on every write path —
   `render`, `render_replace`, `clear`, `reset`, `resize`, and
-  `with_straight_pixels_mut` — so `snapshot()` never returns stale data after a
+  `mark_dirty_and_invalidate_snapshot` — so `snapshot()` never returns stale data after a
   flush executes new ops against the surface.
 - **Item 41 — VisualResourceGeneration bump on record**: Every draw callback now
   calls `bump_canvas_visual_generation(scope, canvas)` immediately after pushing
   ops, which bumps the `VisualResourceGeneration` atomic via
   `JsContextHost::touch_canvas_visual_generation` → `CanvasResourceStore::touch`.
   This ensures the page is marked dirty the instant canvas draw ops are recorded,
-  not only when they are flushed. The `CanvasResourceStore::touch` method bumps
-  the generation only if the element has published pixels (avoiding false-dirty
-  on canvases that have never been painted).
+  not only when they are flushed. `CanvasResourceStore::touch` also bumps the
+  generation for the first draw, before the canvas has published any pixels.
 - **`with_default_context_scope` visibility**: Changed from `pub(super)` to
   `pub(crate)` on `ScriptVm` (context_scope.rs) so `runtime::page_screenshot`
   can call it.
-- **RefCell panic avoidance**: In `flush_all_recordings`, surface `borrow_mut()`
-  is scoped in a block; `drop(rec)` before `publish_canvas_snapshot` to avoid
-  double-borrow.
+- **Flush without JS re-entry**: Dimensions come from native DOM attributes or
+  private OffscreenCanvas slots, never public `width`/`height` properties.
+  Recording and surface borrows are released before snapshot publication.
 
-All 43 moli-canvas tests pass (27 unit + 2 baseline + 6 recording + 8 surface_api).
-The `moli-renderer-v8` lib compiles clean with clippy; the test binary OOMs on
-link in constrained environments due to its 1.3 GB size (v8 + all deps).
+Renderer integration coverage verifies region reads without full-image
+conversion, publication after region readback, instance/prototype dimension
+getters that must not execute, invalidation before the first flush, and clipped
+ImageData writes. RGB and alpha regressions cover fill, stroke, and strokeRect.
 
 
 ---
@@ -352,18 +355,19 @@ The renderer now drives all Canvas 2D draws through the recording engine:
 - `recording_store.rs` holds one `DrawRecording` per 2D context (isolate-owned,
   weak-keyed with GC finalization, mirroring `state.rs`). `recording.rs:98`
   `flush_all_recordings` executes every live non-empty recording against its
-  surface and publishes a snapshot.
+  surface and publishes dirty surfaces, including those already flushed by
+  region readback.
 - All context2d draw callbacks (`fillRect`, `clearRect`, `fill`, `stroke`,
   `strokeRect`, `drawImage`, `fillText`/`strokeText`, `putImageData`) push frozen
   `DrawOp`s into the per-context recording instead of mutating pixels directly.
 - Recording colors are **straight** (non-premultiplied) RGBA8: `peniko::Color`
   (`color::AlphaColor<Srgb>`) expects straight channels, so `to_color` divides the
   stored byte values by 255 and Vello premultiplies internally. `globalAlpha` is
-  applied for path ops (`fill`, `stroke`, `strokeRect`) via `apply_global_alpha`
-  but not for direct ops (`fillRect`, `fillText`, `strokeText`, `drawImage`),
+  applied for path ops (`fillRect`, `fill`, `stroke`, `strokeRect`) via `apply_global_alpha`
+  but not for direct ops (`fillText`, `strokeText`, `drawImage`),
   matching the previous per-op semantics.
 - Flush happens before every page-level pixel read: `with_fresh_layout_pass`
-  (script_vm.rs) flushes recordings before layout, and `capture_screencast_frame`
+  (script_vm/layout.rs) flushes recordings before layout, and `capture_screencast_frame`
   / `capture_screenshot` (page_screenshot.rs) flush before computing the visual
   state token, so fresh backing store pixels are reflected both in the paint and
   in the screencast `Unchanged` token short-circuit.
