@@ -1,8 +1,10 @@
 #[cfg(test)]
 use std::path::PathBuf;
 use std::{
+    future::IntoFuture,
     net::SocketAddr,
     sync::{Arc, atomic::AtomicU64},
+    time::Duration,
 };
 
 use anyhow::Result;
@@ -10,9 +12,10 @@ use anyhow::{Context, anyhow};
 use axum::{
     Router,
     body::Body,
+    extract::State,
     http::{HeaderValue, Request, header},
     middleware::{self, Next},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{any, get, post, put},
     serve::ListenerExt,
 };
@@ -39,6 +42,7 @@ mod cdp;
 mod cdp_agent_host;
 mod cdp_owner;
 mod cdp_socket;
+mod instance_shutdown;
 mod protocol_local_executor;
 mod tcp_options;
 mod webdriver_bidi;
@@ -47,6 +51,7 @@ mod webdriver_files;
 
 use cdp_agent_host::SharedCdpAgentHostDirectory;
 use cdp_owner::SharedCdpOwnerRegistry;
+use instance_shutdown::InstanceShutdown;
 use webdriver_bidi::SharedBidiSessionRegistry;
 use webdriver_classic::SharedClassicSessionRegistry;
 
@@ -158,19 +163,50 @@ impl ProtocolServer {
             self.config.screencast_interval_ms,
         )?;
 
-        let cdp_owner_registry = app_state.cdp_owner_registry.clone();
-        let app = build_router(app_state);
-
-        let listener = listener.tap_io(|tcp_stream| {
-            tcp_options::configure_accepted_protocol_stream(tcp_stream);
-        });
-        let result = axum::serve(listener, app).await;
-        cdp_owner_registry.shutdown().await;
-        result.context("protocol server failed")
+        serve_listener(listener, app_state).await
     }
 }
 
+/// Shared by the executable and instance-lifecycle integration tests.
+async fn serve_listener(listener: TcpListener, app_state: AppState) -> Result<()> {
+    const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
+    let shutdown = app_state.shutdown.clone();
+    let cdp_owner_registry = app_state.cdp_owner_registry.clone();
+    let classic_session_registry = app_state.classic_session_registry.clone();
+    let cookie_profile = app_state.cookie_profile.clone();
+    let listener =
+        listener.tap_io(|stream| tcp_options::configure_accepted_protocol_stream(stream));
+    let stop_accepting = shutdown.clone();
+    let serving = axum::serve(listener, build_router(app_state))
+        .with_graceful_shutdown(async move { stop_accepting.requested().await })
+        .into_future();
+    tokio::pin!(serving);
+    let completed = tokio::select! {
+        result = &mut serving => Some(result),
+        _ = shutdown.requested() => None,
+    };
+    shutdown.request();
+    tokio::time::timeout(SHUTDOWN_BUDGET, async {
+        let (_, result) = tokio::join!(cdp_owner_registry.shutdown(), async {
+            // Drain in-flight HTTP requests before taking the final Classic
+            // session set. New requests and upgraded sockets are rejected.
+            match completed {
+                Some(result) => result,
+                None => (&mut serving).await,
+            }
+            .context("protocol server failed")?;
+            classic_session_registry.shutdown(&cookie_profile).await?;
+            shutdown.drained().await;
+            Ok(())
+        });
+        result
+    })
+    .await
+    .context("protocol server shutdown timed out; checkpoints may be incomplete")?
+}
+
 fn build_router(app_state: AppState) -> Router {
+    let shutdown = app_state.shutdown.clone();
     Router::new()
         .route("/status", get(webdriver_classic::webdriver_classic_status))
         .route("/status/", get(webdriver_classic::webdriver_classic_status))
@@ -686,6 +722,18 @@ fn build_router(app_state: AppState) -> Router {
         .layer(middleware::from_fn(
             classic_webdriver_response_headers_middleware,
         ))
+        .layer(middleware::from_fn_with_state(shutdown, instance_admission))
+}
+
+async fn instance_admission(
+    State(shutdown): State<InstanceShutdown>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let Some(_connection) = shutdown.connection() else {
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    next.run(request).await
 }
 
 async fn classic_webdriver_response_headers_middleware(
@@ -737,6 +785,7 @@ fn is_websocket_upgrade_request(request: &Request<Body>) -> bool {
 
 #[derive(Clone)]
 struct AppState {
+    shutdown: InstanceShutdown,
     browser_ws_url: String,
     page_ws_url: String,
     bidi_ws_url: String,
@@ -810,6 +859,7 @@ impl AppState {
             screencast_interval_ms,
         );
         Self {
+            shutdown: InstanceShutdown::default(),
             browser_ws_url: format!("ws://{addr}/devtools/browser/{DEFAULT_BROWSER_ID}"),
             page_ws_url: format!("ws://{addr}/devtools/page/{DEFAULT_TARGET_ID}"),
             bidi_ws_url: format!("ws://{addr}/session"),
