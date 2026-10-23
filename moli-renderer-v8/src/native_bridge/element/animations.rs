@@ -6,12 +6,8 @@ use crate::native_bridge::context_host::{RunningAnimation, RunningTransition};
 
 use super::ComputedStyleRead;
 use super::css_animation_start_applies;
-<<<<<<< Updated upstream
-use super::events::{construct_simple_event, dispatch_public_event};
-use super::styles::StyleObservation;
-=======
 use super::events::dispatch_public_event;
->>>>>>> Stashed changes
+use super::styles::StyleObservation;
 
 pub(crate) fn queue_animation_start_for_listener_target(
     scope: &mut v8::PinScope<'_, '_>,
