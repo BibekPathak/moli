@@ -2344,3 +2344,5 @@ mod file_reader_handlers;
 mod streams_sync_protocol;
 
 mod performance_user_timing;
+
+mod xml_serializer_receivers;
