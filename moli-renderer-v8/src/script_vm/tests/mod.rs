@@ -2231,6 +2231,9 @@ mod script_terminal_completion;
 mod speech_events;
 mod storage_dense_name_arrays;
 mod streams;
+
+mod location_own_native_receivers;
+
 mod svg_filter_interfaces;
 mod svg_geometry_methods;
 mod svg_geometry_receivers;
