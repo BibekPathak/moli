@@ -2182,6 +2182,9 @@ mod gamepad_interfaces;
 mod dom_elements;
 mod dom_exception_proxy_identity;
 mod dom_xhr;
+
+mod svg_length_list_native_receivers;
+
 mod element_click;
 mod eme_owner_interface_exposure_interfaces;
 mod encoded_video_chunk_shell;
