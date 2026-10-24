@@ -2250,6 +2250,9 @@ mod web_lock_interface_exposure_interfaces;
 mod webgl_interfaces;
 mod webidl_collections;
 mod webidl_fetch;
+
+mod idb_object_store_native_receivers;
+
 mod webidl_receivers;
 mod webidl_trusted_types;
 mod websocket;
