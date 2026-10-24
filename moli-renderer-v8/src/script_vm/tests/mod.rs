@@ -2197,6 +2197,9 @@ mod element_click;
 mod eme_owner_interface_exposure_interfaces;
 mod encoded_video_chunk_shell;
 mod event_receivers;
+
+mod svg_number_list_native_receivers;
+
 mod geometry_point_conversion_order;
 mod headers_list;
 mod http_fixture;
