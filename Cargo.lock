@@ -2700,6 +2700,7 @@ name = "moli-cookie-cache"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cookie",
  "moli-cookie-jar",
  "netscape-cookie-file-parser",
  "serde",
