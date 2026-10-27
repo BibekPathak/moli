@@ -294,6 +294,13 @@ impl JsContextHost {
             return Err(LayoutError::ReentrantLayoutPass);
         }
         let document = self.document_handle();
+        if self.animation_transition_state().has_ticking_effects() {
+            // Sampling is demand-driven. A live effect invalidates only the
+            // requested layout, without a periodic render or full DOM scan.
+            self.document_layout_state
+                .borrow_mut()
+                .clear_latest_layout();
+        }
         if self
             .document_layout_state
             .borrow()
