@@ -930,7 +930,7 @@ fn with_resolved_style_in_current_world<R>(
     })
 }
 
-fn install_shadow_cascade_data_for_resolution(
+pub(super) fn install_shadow_cascade_data_for_resolution(
     world: &DocumentStyleWorld,
     dom_adapter: &moli_selector::StyloDomHostBinding<'_>,
 ) {
