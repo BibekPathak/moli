@@ -1870,15 +1870,6 @@ impl JsContextHost {
         )
     }
 
-    pub(crate) fn can_sample_animation_property(
-        &self,
-        document: DomHandle,
-        property: &str,
-    ) -> bool {
-        self.style_engine
-            .can_sample_animation_property(document, property)
-    }
-
     pub(crate) fn transition_values_are_eligible(
         &self,
         document: DomHandle,
