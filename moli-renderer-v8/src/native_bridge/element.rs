@@ -171,7 +171,7 @@ pub(crate) use shadow_dom::{
     ensure_shadow_root_adopted_style_sheets_initialized,
 };
 pub(crate) use styles::{
-    ComputedStyleRead, PreparedAnonymousStyleContext, StyleMode,
+    ComputedStyleRead, PreparedAnonymousStyleContext, StyleMode, commit_animation_style_values,
     computed_style_properties_for_inspector_handle,
     computed_style_property_values_for_document_snapshot, css_animation_effect_keyframes,
     cssom_style_entry_requires_structured_parser,
