@@ -290,10 +290,9 @@ fn font_style(style: StyloFontStyle) -> FontStyle {
     }
 }
 
-/// Applies `font-variation-settings` and, for `font-optical-sizing: auto`, an
-/// `opsz` value equal to the font size in CSS pixels, as Chromium does. An
-/// explicit `opsz` setting wins. Fonts without an `opsz` axis ignore it.
-/// This is what makes `system-ui` pick the SF Text design at body sizes.
+/// Automatic optical sizing supplies the font size in CSS pixels as `opsz`.
+/// Explicit `font-variation-settings` take priority; missing axes are ignored.
+/// Per-face `size-adjust` is not yet propagated to shaping.
 fn font_variations(
     settings: &FontVariationSettings,
     optical_size: Option<f32>,
@@ -457,19 +456,4 @@ fn text_stroke(
         color,
         paint_first,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn optical_size_is_the_font_size_unless_opsz_is_set_explicitly() {
-        let none = FontVariationSettings::normal();
-        let auto = font_variations(&none, Some(16.0));
-        assert_eq!(auto.len(), 1);
-        assert_eq!(auto[0].tag, Tag::from_bytes(*b"opsz"));
-        assert_eq!(auto[0].value, 16.0);
-        assert!(font_variations(&none, None).is_empty());
-    }
 }

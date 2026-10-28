@@ -29,6 +29,24 @@ The narrow and wide variants use 500-unit and 1000-unit advances. Four letters
 at 40px have widths of 80px and 160px respectively, providing controls for
 FontFaceSet selection order without relying on installed fonts.
 
+## Project-generated optical sizing face
+
+Regenerate `moli-opsz.ttf` with:
+
+```bash
+uv run scripts/generate-optical-sizing-test-font.py
+```
+
+This original 1000-unit-em variable font is licensed under MIT OR Apache-2.0.
+It contains `A` and space, with an `opsz` axis spanning 8 to 64 (default 16).
+The three masters use advances and rectangular ink widths of 400, 600 and
+1200 units at optical sizes 8, 16 and 64. Both `gvar` and `HVAR` are generated,
+so real shaping and painting can distinguish optical sizing from scaling the
+CSS font size. For example, two `A`s at 32px measure 51.2px with automatic
+optical sizing and 38.4px with `font-optical-sizing: none`.
+
+SHA-256: `c6be9d7a90aceb210bee50989b38c50657d6dd46729f195475b343559ae238c0`.
+
 ## Subset fallback faces
 
 | Fixture | Included code points | Source and source SHA-256 | License | Fixture SHA-256 |
